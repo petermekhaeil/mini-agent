@@ -7,6 +7,7 @@ import { listFilesTool } from "./tools/list";
 import { readConfinedFile, readFileTool } from "./tools/read";
 import { bashTool, type ConfirmBash } from "./tools/bash";
 import { editFileTool, type ConfirmEdit } from "./tools/edit";
+import { codeSearchTool } from "./tools/search";
 
 export const READ_FILE_TOOL = {
   type: "function" as const,
@@ -41,6 +42,24 @@ export const LIST_FILES_TOOL = {
           description: "Directory path relative to the working directory; defaults to .",
         },
       },
+      additionalProperties: false,
+    },
+  },
+};
+
+export const CODE_SEARCH_TOOL = {
+  type: "function" as const,
+  function: {
+    name: "code_search",
+    description: "Search repository files with a regular expression using ripgrep. Read-only and confined to the working directory.",
+    parameters: {
+      type: "object",
+      properties: {
+        pattern: { type: "string", description: "Non-empty regular expression to search for" },
+        path: { type: "string", description: "File or directory relative to the working directory; defaults to the project root" },
+        glob: { type: "string", description: "Optional ripgrep glob to filter files, such as *.ts" },
+      },
+      required: ["pattern"],
       additionalProperties: false,
     },
   },
@@ -88,7 +107,7 @@ const SYSTEM_PROMPT = [
   "The bash tool asks the user for approval. Call it directly instead of asking for approval in a chat reply.",
   "The edit_file tool asks the user for approval. Call it directly instead of asking for approval in a chat reply.",
   "Do not modify files except through an approved edit_file call or bash command. If an action is denied, do not retry it.",
-  "Use list_files to find files and read_file to inspect their contents.",
+  "Use code_search to find matching code, list_files to find file paths, and read_file to inspect file contents.",
 ].join(" ");
 
 async function buildSystemPrompt(cwd: string): Promise<string> {
@@ -126,7 +145,7 @@ export async function runAgent(
     const response = await client.chat.completions.create({
       model,
       messages,
-      tools: [READ_FILE_TOOL, LIST_FILES_TOOL, BASH_TOOL, EDIT_FILE_TOOL],
+      tools: [READ_FILE_TOOL, LIST_FILES_TOOL, CODE_SEARCH_TOOL, BASH_TOOL, EDIT_FILE_TOOL],
       tool_choice: "auto",
     });
     const assistant = response.choices[0]?.message;
@@ -157,6 +176,9 @@ export async function runAgent(
               break;
             case "list_files":
               result = await listFilesTool(args, cwd);
+              break;
+            case "code_search":
+              result = await codeSearchTool(args, cwd);
               break;
             case "bash":
               result = await bashTool(args, cwd, confirmBash);

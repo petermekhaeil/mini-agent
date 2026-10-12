@@ -13,6 +13,7 @@ import { listFilesTool } from "../src/tools/list";
 import { readFileTool } from "../src/tools/read";
 import { bashTool } from "../src/tools/bash";
 import { editFileTool } from "../src/tools/edit";
+import { codeSearchTool } from "../src/tools/search";
 import { confirmBash, confirmEdit } from "../src/cli";
 
 const temporaryDirectories: string[] = [];
@@ -249,6 +250,31 @@ describe("agent tool round-trip", () => {
     expect(await Bun.file(path.join(cwd, "a.txt")).text()).toBe("a!");
     expect(await Bun.file(path.join(cwd, "b.txt")).text()).toBe("b!");
   });
+
+  test("executes code_search calls with matching IDs and registers the tool", async () => {
+    const cwd = await tempDir();
+    await writeFile(path.join(cwd, "src.ts"), "const needle = true;\n");
+    const calls: ChatCompletionCreateParamsNonStreaming[] = [];
+    const client = mockClient([
+      mockCompletion({
+        role: "assistant",
+        content: null,
+        refusal: null,
+        tool_calls: [{
+          id: "search-call",
+          type: "function",
+          function: { name: "code_search", arguments: JSON.stringify({ pattern: "needle" }) },
+        }],
+      }),
+      mockCompletion({ role: "assistant", content: "Found it.", refusal: null }),
+    ], (request) => calls.push(structuredClone(request)));
+
+    const result = await runAgent(client, "test-model", "Find needle", cwd);
+    expect(result.answer).toBe("Found it.");
+    expect(calls[0].tools?.map((tool) => tool.type === "function" ? tool.function.name : "")).toContain("code_search");
+    expect(calls[1].messages.at(-1)).toMatchObject({ role: "tool", tool_call_id: "search-call" });
+    expect(calls[1].messages.at(-1)?.content).toContain("src.ts:1:const needle = true;");
+  });
 });
 
 describe("bash", () => {
@@ -345,6 +371,62 @@ describe("bash", () => {
       expect(result).toStartWith("Error:");
     }
     expect(confirmations).toBe(0);
+  });
+});
+
+describe("code_search", () => {
+  test("searches the project root or a scoped path and filters with glob", async () => {
+    const cwd = await tempDir();
+    await mkdir(path.join(cwd, "src"));
+    await mkdir(path.join(cwd, "docs"));
+    await writeFile(path.join(cwd, "src", "app.ts"), "const needle = 1;\n");
+    await writeFile(path.join(cwd, "src", "other.js"), "const needle = 2;\n");
+    await writeFile(path.join(cwd, "docs", "readme.md"), "needle in docs\n");
+
+    const rootResults = await codeSearchTool({ pattern: "needle" }, cwd);
+    expect(rootResults).toContain("src/app.ts:1:const needle = 1;");
+    expect(rootResults).toContain("docs/readme.md:1:needle in docs");
+
+    const scoped = await codeSearchTool({ pattern: "needle", path: "src", glob: "*.ts" }, cwd);
+    expect(scoped).toBe("src/app.ts:1:const needle = 1;");
+    expect(scoped).not.toContain("other.js");
+  });
+
+  test("reports invalid regexes, no matches, leading-dash patterns, and bad arguments", async () => {
+    const cwd = await tempDir();
+    await writeFile(path.join(cwd, "sample.txt"), "-needle here\nordinary\n");
+    expect(await codeSearchTool({ pattern: "[" }, cwd)).toMatch(/^Error: ripgrep failed/);
+    expect(await codeSearchTool({ pattern: "absent" }, cwd)).toBe("(no matches)");
+    expect(await codeSearchTool({ pattern: "-needle" }, cwd)).toContain("sample.txt:1:-needle here");
+    expect(await codeSearchTool({ pattern: "" }, cwd)).toContain("pattern must be a non-empty string");
+    expect(await codeSearchTool({ pattern: "needle", path: 4 }, cwd)).toContain("path must be a non-empty string");
+    expect(await codeSearchTool({ pattern: "needle", glob: "" }, cwd)).toContain("glob must be a non-empty string");
+    expect(await codeSearchTool(null, cwd)).toContain("arguments must be an object");
+  });
+
+  test("confines paths and limits results by both line count and characters", async () => {
+    const parent = await tempDir();
+    const cwd = path.join(parent, "work");
+    const outside = path.join(parent, "outside.txt");
+    await mkdir(cwd);
+    await writeFile(outside, "needle outside\n");
+    await symlink(outside, path.join(cwd, "linked.txt"));
+    expect(await codeSearchTool({ pattern: "needle", path: "../outside.txt" }, cwd)).toStartWith("Error:");
+    expect(await codeSearchTool({ pattern: "needle", path: "linked.txt" }, cwd)).toStartWith("Error:");
+    expect(await codeSearchTool({ pattern: "needle", path: "missing.txt" }, cwd)).toStartWith("Error:");
+
+    const manyShortLines = Array.from({ length: 130 }, (_, index) => `needle ${index}`).join("\n");
+    await writeFile(path.join(cwd, "many.txt"), manyShortLines);
+    const lineLimited = await codeSearchTool({ pattern: "needle", path: "many.txt" }, cwd);
+    expect(lineLimited).toContain("additional matches omitted");
+    expect(lineLimited.split("\n").filter((line) => /many\.txt:\d+:/.test(line))).toHaveLength(100);
+    expect(lineLimited.split("\n")).toHaveLength(101);
+
+    const longLines = Array.from({ length: 80 }, (_, index) => `needle ${index} ${"x".repeat(200)}`).join("\n");
+    await writeFile(path.join(cwd, "long.txt"), longLines);
+    const charLimited = await codeSearchTool({ pattern: "needle", path: "long.txt" }, cwd);
+    expect(charLimited.length).toBeLessThanOrEqual(8_000);
+    expect(charLimited).toContain("8,000 character limit");
   });
 });
 
