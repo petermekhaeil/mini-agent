@@ -13,7 +13,7 @@ bun run start "Find the code that limits directory listings. How many paths can 
 
 The default model is `gpt-4o-mini`. Set `AGENT_MODEL` to use another OpenAI model. You can also pipe a request: `echo "Read README.md" | bun run start`.
 
-Run it in a directory without secrets. `read_file` sends requested file contents to OpenAI and prints them in your terminal. The path check blocks files outside the working directory, not secrets inside it. Keep your API key out of the repo.
+Run it in a directory without secrets. `read_file` sends requested file contents to OpenAI even though the CLI only prints your request and the final answer. The path check blocks files outside the working directory, not secrets inside it. Keep your API key out of the repo.
 
 ## How it works
 
@@ -40,7 +40,7 @@ sequenceDiagram
         end
     end
     Agent-->>CLI: answer + messages
-    CLI-->>User: print the conversation
+    CLI-->>User: print request and final answer
 ```
 
 `src/loop.ts` keeps the full assistant tool call in the conversation. Each result goes back with the same `tool_call_id`, so OpenAI knows which call it answers.
