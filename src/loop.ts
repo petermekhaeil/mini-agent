@@ -5,6 +5,7 @@ import type {
 } from "openai/resources/chat/completions";
 import { listFilesTool } from "./tools/list";
 import { readConfinedFile, readFileTool } from "./tools/read";
+import { bashTool, type ConfirmBash } from "./tools/bash";
 
 export const READ_FILE_TOOL = {
   type: "function" as const,
@@ -44,12 +45,29 @@ export const LIST_FILES_TOOL = {
   },
 };
 
+export const BASH_TOOL = {
+  type: "function" as const,
+  function: {
+    name: "bash",
+    description: "Request a shell command in the working directory. Call this tool directly; it asks the user for approval before running.",
+    parameters: {
+      type: "object",
+      properties: {
+        command: { type: "string", description: "Shell command to run" },
+      },
+      required: ["command"],
+      additionalProperties: false,
+    },
+  },
+};
+
 export type Message = ChatCompletionMessageParam | ChatCompletionMessage;
 
 const SYSTEM_PROMPT = [
-  "You are a read-only coding assistant.",
+  "You are a coding assistant. Use bash when a shell command would help.",
   "Inspect the codebase to answer the user's request.",
-  "Do not modify files or execute commands.",
+  "The bash tool asks the user for approval. Call it directly instead of asking for approval in a chat reply.",
+  "Do not modify files except through an approved command. If a command is denied, do not retry it.",
   "Use list_files to find files and read_file to inspect their contents.",
 ].join(" ");
 
@@ -75,6 +93,7 @@ export async function runAgent(
   request: string,
   cwd = process.cwd(),
   maxTurns = 25,
+  confirmBash: ConfirmBash = async () => false,
 ): Promise<{ answer: string; messages: Message[] }> {
   const systemPrompt = await buildSystemPrompt(cwd);
   const messages: ChatCompletionMessageParam[] = [
@@ -86,7 +105,7 @@ export async function runAgent(
     const response = await client.chat.completions.create({
       model,
       messages,
-      tools: [READ_FILE_TOOL, LIST_FILES_TOOL],
+      tools: [READ_FILE_TOOL, LIST_FILES_TOOL, BASH_TOOL],
       tool_choice: "auto",
     });
     const assistant = response.choices[0]?.message;
@@ -109,19 +128,24 @@ export async function runAgent(
       if (call.type !== "function") {
         result = "Error: unsupported custom tool call";
       } else {
-        const toolName = call.function.name;
-        if (toolName !== "read_file" && toolName !== "list_files") {
-          result = `Error: unknown tool ${toolName}`;
-        } else {
-          try {
-            const args: unknown = JSON.parse(call.function.arguments);
-            result = toolName === "read_file"
-              ? await readFileTool(args, cwd)
-              : await listFilesTool(args, cwd);
-          } catch (error) {
-            const message = error instanceof Error ? error.message : String(error);
-            result = `Error: ${message}`;
+        try {
+          const args: unknown = JSON.parse(call.function.arguments);
+          switch (call.function.name) {
+            case "read_file":
+              result = await readFileTool(args, cwd);
+              break;
+            case "list_files":
+              result = await listFilesTool(args, cwd);
+              break;
+            case "bash":
+              result = await bashTool(args, cwd, confirmBash);
+              break;
+            default:
+              result = `Error: unknown tool ${call.function.name}`;
           }
+        } catch (error) {
+          const message = error instanceof Error ? error.message : String(error);
+          result = `Error: ${message}`;
         }
       }
 

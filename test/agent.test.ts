@@ -1,7 +1,8 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { chmod, mkdtemp, mkdir, rm, symlink, writeFile } from "node:fs/promises";
+import { chmod, mkdtemp, mkdir, realpath, rm, symlink, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
+import { PassThrough } from "node:stream";
 import type {
   ChatCompletion,
   ChatCompletionCreateParamsNonStreaming,
@@ -10,6 +11,8 @@ import { runAgent } from "../src/loop";
 import { createChatClient, type ChatClient } from "../src/llm";
 import { listFilesTool } from "../src/tools/list";
 import { readFileTool } from "../src/tools/read";
+import { bashTool } from "../src/tools/bash";
+import { confirmBash } from "../src/cli";
 
 const temporaryDirectories: string[] = [];
 
@@ -179,6 +182,197 @@ describe("agent tool round-trip", () => {
     expect(result.messages[5]).toMatchObject({ role: "tool", tool_call_id: "no-path" });
     expect(result.messages[6]).toMatchObject({ role: "tool", tool_call_id: "null" });
     expect(result.messages[7]).toMatchObject({ role: "tool", tool_call_id: "bad-list-path" });
+  });
+
+  test("executes sequential bash calls with separate confirmations and matching IDs", async () => {
+    const cwd = await tempDir();
+    const calls: ChatCompletionCreateParamsNonStreaming[] = [];
+    const client = mockClient([
+      mockCompletion({
+        role: "assistant",
+        content: null,
+        refusal: null,
+        tool_calls: ["one", "two"].map((id, index) => ({
+          id: `bash-${id}`,
+          type: "function" as const,
+          function: { name: "bash", arguments: JSON.stringify({ command: `printf ${index + 1}` }) },
+        })),
+      }),
+      mockCompletion({ role: "assistant", content: "done", refusal: null }),
+    ], (request) => calls.push(structuredClone(request)));
+    const confirmations: Array<[string, string]> = [];
+    const result = await runAgent(client, "test-model", "run commands", cwd, 25, async (command, dir) => {
+      confirmations.push([command, dir]);
+      return true;
+    });
+    expect(confirmations).toEqual([["printf 1", cwd], ["printf 2", cwd]]);
+    expect(calls[1].messages.at(-2)).toMatchObject({ role: "tool", tool_call_id: "bash-one" });
+    expect(calls[1].messages.at(-2)?.content).toContain("stdout:\n1");
+    expect(calls[1].messages.at(-1)).toMatchObject({ role: "tool", tool_call_id: "bash-two" });
+    expect(calls[1].messages.at(-1)?.content).toContain("stdout:\n2");
+    expect(result.answer).toBe("done");
+  });
+});
+
+describe("bash", () => {
+  test("defaults to denial and explicit denial never creates a sentinel", async () => {
+    const cwd = await tempDir();
+    const sentinel = path.join(cwd, "sentinel");
+    const command = `touch ${JSON.stringify(sentinel)}`;
+    expect(await bashTool({ command }, cwd)).toContain("denied");
+    expect(await bashTool({ command }, cwd, async () => false)).toContain("denied");
+    expect(await Bun.file(sentinel).exists()).toBe(false);
+  });
+
+  test("approval rejection returns a result without spawning", async () => {
+    const cwd = await tempDir();
+    const result = await bashTool({ command: "true" }, cwd, async () => { throw new Error("no prompt"); });
+    expect(result).toContain("approval failed: no prompt");
+  });
+
+  test("approval executes the exact command in cwd and reports nonzero stderr", async () => {
+    const cwd = await tempDir();
+    const command = "printf '%s' \"$PWD\"; printf 'bad' >&2; exit 7";
+    const result = await bashTool({ command }, cwd, async (approvedCommand, approvedCwd) => {
+      expect(approvedCommand).toBe(command);
+      expect(approvedCwd).toBe(cwd);
+      return true;
+    });
+    expect(result).toContain(`stdout:\n${await realpath(cwd)}`);
+    expect(result).toContain("stderr:\nbad");
+    expect(result).toContain("Exit code: 7.");
+  });
+
+  test("reports signal termination separately from a timeout", async () => {
+    const cwd = await tempDir();
+    const result = await bashTool({ command: "kill -TERM $$" }, cwd, async () => true);
+    expect(result).toContain("Terminated by signal SIGTERM.");
+    expect(result).not.toContain("Timed out");
+  });
+
+  test("resolves relative cwd before approval even if the callback changes process.cwd", async () => {
+    const original = process.cwd();
+    const elsewhere = await tempDir();
+    try {
+      const result = await bashTool({ command: "pwd" }, ".", async (_command, approvedCwd) => {
+        expect(approvedCwd).toBe(original);
+        process.chdir(elsewhere);
+        return true;
+      });
+      expect(result).toContain(`stdout:\n${await realpath(original)}`);
+    } finally {
+      process.chdir(original);
+    }
+  });
+
+  test("SIGKILLs a shell that ignores TERM after timeout", async () => {
+    const cwd = await tempDir();
+    const pidFile = path.join(cwd, "shell.pid");
+    const result = await bashTool(
+      { command: `trap '' TERM; printf '%s' "$$" > ${JSON.stringify(pidFile)}; while :; do sleep 1; done` },
+      cwd,
+      async () => true,
+      40,
+    );
+    expect(result).toContain("Timed out after 40 ms (SIGKILL).");
+    const pid = Number(await Bun.file(pidFile).text());
+    let exited = false;
+    for (let attempt = 0; attempt < 30; attempt++) {
+      try { process.kill(pid, 0); } catch { exited = true; break; }
+      await Bun.sleep(10);
+    }
+    expect(exited).toBe(true);
+  });
+
+  test("caps returned output after capturing stdout and stderr", async () => {
+    const cwd = await tempDir();
+    const result = await bashTool(
+      { command: "head -c 10000 /dev/zero | tr '\\0' x; head -c 10000 /dev/zero | tr '\\0' y >&2" },
+      cwd,
+      async () => true,
+    );
+    expect(result.length).toBeLessThanOrEqual(8_000);
+    expect(result).toContain("stdout:");
+    expect(result).toContain("stderr:");
+    expect(result).toMatch(/\[truncated \d+ chars\]/);
+    expect(result).toContain("Exit code: 0.");
+    const omitted = Number(result.match(/\[truncated (\d+) chars\]/)?.[1]);
+    expect(omitted).toBeGreaterThan(10_000);
+  });
+
+  test("malformed arguments never request approval", async () => {
+    const cwd = await tempDir();
+    let confirmations = 0;
+    for (const args of ["not an object", null, {}, { command: 4 }, { command: "  " }]) {
+      const result = await bashTool(args, cwd, async () => { confirmations++; return true; });
+      expect(result).toStartWith("Error:");
+    }
+    expect(confirmations).toBe(0);
+  });
+});
+
+describe("CLI bash confirmation", () => {
+  function ttyPair() {
+    const input = new PassThrough() as PassThrough & { isTTY: boolean };
+    const output = new PassThrough() as PassThrough & { isTTY: boolean };
+    Object.defineProperty(input, "isTTY", { value: true });
+    Object.defineProperty(output, "isTTY", { value: true });
+    return { input, output };
+  }
+
+  test("settles false on input close instead of leaving approval pending", async () => {
+    const { input, output } = ttyPair();
+    const pending = confirmBash(
+      "touch sentinel",
+      "/work",
+      input as unknown as typeof process.stdin,
+      output as unknown as typeof process.stderr,
+    );
+    input.destroy();
+    expect(await pending).toBe(false);
+    output.destroy();
+  });
+
+  test("accepts only y or Y", async () => {
+    for (const [reply, expected] of [["y\n", true], ["Y\n", true], ["yes\n", false], ["\n", false]] as const) {
+      const { input, output } = ttyPair();
+      const pending = confirmBash("pwd", "/work", input as unknown as typeof process.stdin, output as unknown as typeof process.stderr);
+      input.write(reply);
+      expect(await pending).toBe(expected);
+      input.destroy();
+      output.destroy();
+    }
+  });
+
+  test("denies non-interactive input without waiting for a reply", async () => {
+    const input = new PassThrough();
+    const { output } = ttyPair();
+    input.write("y\n");
+    expect(await confirmBash("pwd", "/work", input as unknown as typeof process.stdin, output as unknown as typeof process.stderr)).toBe(false);
+    input.destroy();
+    output.destroy();
+  });
+
+  test("settles false on input EOF", async () => {
+    const { input, output } = ttyPair();
+    const pending = confirmBash("pwd", "/work", input as unknown as typeof process.stdin, output as unknown as typeof process.stderr);
+    input.end();
+    expect(await pending).toBe(false);
+    output.destroy();
+  });
+
+  test("settles false on Ctrl-C", async () => {
+    const { input, output } = ttyPair();
+    const pending = confirmBash(
+      "touch sentinel",
+      "/work",
+      input as unknown as typeof process.stdin,
+      output as unknown as typeof process.stderr,
+    );
+    input.emit("keypress", "\u0003", { ctrl: true, name: "c" });
+    expect(await pending).toBe(false);
+    input.destroy();
+    output.destroy();
   });
 });
 
