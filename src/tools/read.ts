@@ -4,10 +4,10 @@ import path from "node:path";
 const MAX_CHARS = 8_000;
 const TRUNCATION_RESERVE = 40;
 
-export async function readConfinedFile(
+export async function resolveConfinedPath(
   filePath: string,
   cwd = process.cwd(),
-): Promise<string> {
+): Promise<{ root: string; resolved: string }> {
   const root = await realpath(cwd);
   const resolved = await realpath(path.resolve(root, filePath));
   const relative = path.relative(root, resolved);
@@ -18,6 +18,14 @@ export async function readConfinedFile(
   ) {
     throw new Error("path must stay within the working directory");
   }
+  return { root, resolved };
+}
+
+export async function readConfinedFile(
+  filePath: string,
+  cwd = process.cwd(),
+): Promise<string> {
+  const { resolved } = await resolveConfinedPath(filePath, cwd);
   return Bun.file(resolved).text();
 }
 

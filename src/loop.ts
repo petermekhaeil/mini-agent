@@ -3,6 +3,7 @@ import type {
   ChatCompletionMessage,
   ChatCompletionMessageParam,
 } from "openai/resources/chat/completions";
+import { listFilesTool } from "./tools/list";
 import { readConfinedFile, readFileTool } from "./tools/read";
 
 export const READ_FILE_TOOL = {
@@ -25,13 +26,31 @@ export const READ_FILE_TOOL = {
   },
 };
 
+export const LIST_FILES_TOOL = {
+  type: "function" as const,
+  function: {
+    name: "list_files",
+    description: "List repository file paths recursively under a directory.",
+    parameters: {
+      type: "object",
+      properties: {
+        path: {
+          type: "string",
+          description: "Directory path relative to the working directory; defaults to .",
+        },
+      },
+      additionalProperties: false,
+    },
+  },
+};
+
 export type Message = ChatCompletionMessageParam | ChatCompletionMessage;
 
 const SYSTEM_PROMPT = [
   "You are a read-only coding assistant.",
   "Inspect the codebase to answer the user's request.",
   "Do not modify files or execute commands.",
-  "Use read_file when you need to inspect files.",
+  "Use list_files to find files and read_file to inspect their contents.",
 ].join(" ");
 
 async function buildSystemPrompt(cwd: string): Promise<string> {
@@ -67,7 +86,7 @@ export async function runAgent(
     const response = await client.chat.completions.create({
       model,
       messages,
-      tools: [READ_FILE_TOOL],
+      tools: [READ_FILE_TOOL, LIST_FILES_TOOL],
       tool_choice: "auto",
     });
     const assistant = response.choices[0]?.message;
@@ -89,15 +108,20 @@ export async function runAgent(
 
       if (call.type !== "function") {
         result = "Error: unsupported custom tool call";
-      } else if (call.function.name !== "read_file") {
-        result = `Error: unknown tool ${call.function.name}`;
       } else {
-        try {
-          const args: unknown = JSON.parse(call.function.arguments);
-          result = await readFileTool(args, cwd);
-        } catch (error) {
-          const message = error instanceof Error ? error.message : String(error);
-          result = `Error: ${message}`;
+        const toolName = call.function.name;
+        if (toolName !== "read_file" && toolName !== "list_files") {
+          result = `Error: unknown tool ${toolName}`;
+        } else {
+          try {
+            const args: unknown = JSON.parse(call.function.arguments);
+            result = toolName === "read_file"
+              ? await readFileTool(args, cwd)
+              : await listFilesTool(args, cwd);
+          } catch (error) {
+            const message = error instanceof Error ? error.message : String(error);
+            result = `Error: ${message}`;
+          }
         }
       }
 

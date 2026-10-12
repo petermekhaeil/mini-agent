@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { mkdtemp, mkdir, rm, symlink, writeFile } from "node:fs/promises";
+import { chmod, mkdtemp, mkdir, rm, symlink, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import type {
@@ -8,6 +8,7 @@ import type {
 } from "openai/resources/chat/completions";
 import { runAgent } from "../src/loop";
 import { createChatClient, type ChatClient } from "../src/llm";
+import { listFilesTool } from "../src/tools/list";
 import { readFileTool } from "../src/tools/read";
 
 const temporaryDirectories: string[] = [];
@@ -80,6 +81,14 @@ describe("agent tool round-trip", () => {
             arguments: '{"path":"note.txt"}',
           },
         },
+        {
+          id: "call_list",
+          type: "function" as const,
+          function: {
+            name: "list_files",
+            arguments: '{"path":"."}',
+          },
+        },
       ],
     };
     const calls: ChatCompletionCreateParamsNonStreaming[] = [];
@@ -107,6 +116,11 @@ describe("agent tool round-trip", () => {
     });
     expect(result.messages[2]).toEqual(assistantToolCall);
     expect(calls[1].messages.at(-1)).toEqual({
+      role: "tool",
+      tool_call_id: "call_list",
+      content: "AGENT.md\nnote.txt",
+    });
+    expect(calls[1].messages.at(-2)).toEqual({
       role: "tool",
       tool_call_id: "call_abc",
       content: "hello\nworld\n",
@@ -143,6 +157,11 @@ describe("agent tool round-trip", () => {
             type: "function",
             function: { name: "read_file", arguments: "null" },
           },
+          {
+            id: "bad-list-path",
+            type: "function",
+            function: { name: "list_files", arguments: '{"path":7}' },
+          },
         ],
         content: null,
         refusal: null,
@@ -154,10 +173,12 @@ describe("agent tool round-trip", () => {
     expect(result.messages[4].content).toStartWith("Error:");
     expect(result.messages[5].content).toStartWith("Error:");
     expect(result.messages[6].content).toStartWith("Error:");
+    expect(result.messages[7].content).toStartWith("Error:");
     expect(result.messages[3]).toMatchObject({ role: "tool", tool_call_id: "bad" });
     expect(result.messages[4]).toMatchObject({ role: "tool", tool_call_id: "missing" });
     expect(result.messages[5]).toMatchObject({ role: "tool", tool_call_id: "no-path" });
     expect(result.messages[6]).toMatchObject({ role: "tool", tool_call_id: "null" });
+    expect(result.messages[7]).toMatchObject({ role: "tool", tool_call_id: "bad-list-path" });
   });
 });
 
@@ -215,5 +236,90 @@ describe("read_file", () => {
     expect(await readFileTool({ path: "nested/escape" }, cwd)).toContain(
       "working directory",
     );
+  });
+});
+
+describe("list_files", () => {
+  test("defaults to cwd, sorts paths, prunes generated directories, and skips symlinks", async () => {
+    const cwd = await tempDir();
+    const outside = await tempDir();
+    await mkdir(path.join(cwd, "src"));
+    await mkdir(path.join(cwd, ".git"));
+    await mkdir(path.join(cwd, "node_modules", "pkg"), { recursive: true });
+    await writeFile(path.join(cwd, "README.md"), "readme");
+    await writeFile(path.join(cwd, "src", "main.ts"), "main");
+    await writeFile(path.join(cwd, ".git", "config"), "git data");
+    await writeFile(path.join(cwd, "node_modules", "pkg", "index.js"), "package");
+    await writeFile(path.join(outside, "secret.txt"), "secret");
+    await symlink(outside, path.join(cwd, "linked"));
+
+    expect(await listFilesTool({}, cwd)).toBe("README.md\nsrc/main.ts");
+  });
+
+  test("returns directory and confinement failures as tool results", async () => {
+    const parent = await tempDir();
+    const cwd = path.join(parent, "work");
+    const outside = path.join(parent, "outside");
+    await mkdir(cwd);
+    await mkdir(outside);
+    await writeFile(path.join(cwd, "file.txt"), "inside");
+    await writeFile(path.join(outside, "secret.txt"), "outside secret");
+    await symlink(outside, path.join(cwd, "escape"));
+
+    const traversal = await listFilesTool({ path: "../outside" }, cwd);
+    const symlinkEscape = await listFilesTool({ path: "escape" }, cwd);
+    const missingDirectory = await listFilesTool({ path: "missing" }, cwd);
+    const fileInsteadOfDirectory = await listFilesTool({ path: "file.txt" }, cwd);
+    expect(traversal).toStartWith("Error:");
+    expect(traversal).not.toContain("outside secret");
+    expect(symlinkEscape).toStartWith("Error:");
+    expect(symlinkEscape).not.toContain("outside secret");
+    expect(missingDirectory).toStartWith("Error:");
+    expect(fileInsteadOfDirectory).toStartWith("Error:");
+  });
+
+  test("stops after the path cap and reports that more files remain", async () => {
+    const cwd = await tempDir();
+    for (let index = 0; index < 205; index++) {
+      const name = `file-${String(index).padStart(3, "0")}.txt`;
+      await writeFile(path.join(cwd, name), "");
+    }
+    const lateDirectory = path.join(cwd, "zzz-late");
+    await mkdir(lateDirectory);
+    await writeFile(path.join(lateDirectory, "should-not-be-read.txt"), "");
+
+    // Make an incorrectly visited late subtree fail, without relying on timing.
+    const canCheckEarlyStop =
+      process.platform !== "win32" && process.getuid?.() !== 0;
+    if (canCheckEarlyStop) await chmod(lateDirectory, 0);
+
+    let result: string;
+    try {
+      result = await listFilesTool({}, cwd);
+    } finally {
+      if (canCheckEarlyStop) await chmod(lateDirectory, 0o700);
+    }
+    const pathsAndNote = result.split("\n");
+    expect(pathsAndNote).toHaveLength(201);
+    expect(pathsAndNote.at(-1)).toBe("[truncated; more paths remain]");
+    expect(result).not.toContain("should-not-be-read.txt");
+  });
+
+  test("caps characters and reports the number omitted", async () => {
+    const cwd = await tempDir();
+    const names: string[] = [];
+    for (let index = 0; index < 150; index++) {
+      const name = `file-${String(index).padStart(3, "0")}-${"x".repeat(70)}.txt`;
+      names.push(name);
+      await writeFile(path.join(cwd, name), "");
+    }
+
+    const result = await listFilesTool({}, cwd);
+    const fullList = names.sort().join("\n");
+    const markerIndex = result.lastIndexOf("\n[truncated ");
+    const keptText = result.slice(0, markerIndex);
+    const omitted = Number(result.match(/\[truncated (\d+) chars\]$/)?.[1]);
+    expect(result.length).toBeLessThanOrEqual(8_000);
+    expect(omitted).toBe(fullList.length - keptText.length);
   });
 });

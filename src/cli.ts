@@ -23,7 +23,7 @@ async function main() {
         }
       }
     } else if (message.role === "tool") {
-      console.log(`read_file result:\n${message.content}`);
+      console.log(`Tool result (${message.tool_call_id}):\n${message.content}`);
     } else if (message.role === "assistant") {
       console.log(`Assistant: ${message.content ?? ""}`);
     }
