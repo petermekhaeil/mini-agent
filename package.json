@@ -1,0 +1,17 @@
+{
+  "name": "mini-agent",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "bun test",
+    "start": "bun src/cli.ts"
+  },
+  "dependencies": {
+    "openai": "^5.12.2"
+  },
+  "devDependencies": {
+    "@types/bun": "^1.2.21",
+    "typescript": "^5.9.2"
+  }
+}
