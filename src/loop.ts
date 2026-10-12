@@ -6,6 +6,7 @@ import type {
 import { listFilesTool } from "./tools/list";
 import { readConfinedFile, readFileTool } from "./tools/read";
 import { bashTool, type ConfirmBash } from "./tools/bash";
+import { editFileTool, type ConfirmEdit } from "./tools/edit";
 
 export const READ_FILE_TOOL = {
   type: "function" as const,
@@ -61,13 +62,32 @@ export const BASH_TOOL = {
   },
 };
 
+export const EDIT_FILE_TOOL = {
+  type: "function" as const,
+  function: {
+    name: "edit_file",
+    description: "Replace one exact, unique text occurrence in an existing UTF-8 text file after user approval. Call this tool directly to request approval.",
+    parameters: {
+      type: "object",
+      properties: {
+        path: { type: "string", description: "File path relative to the working directory" },
+        old_str: { type: "string", description: "Non-empty exact existing text to replace" },
+        new_str: { type: "string", description: "Replacement text" },
+      },
+      required: ["path", "old_str", "new_str"],
+      additionalProperties: false,
+    },
+  },
+};
+
 export type Message = ChatCompletionMessageParam | ChatCompletionMessage;
 
 const SYSTEM_PROMPT = [
   "You are a coding assistant. Use bash when a shell command would help.",
   "Inspect the codebase to answer the user's request.",
   "The bash tool asks the user for approval. Call it directly instead of asking for approval in a chat reply.",
-  "Do not modify files except through an approved command. If a command is denied, do not retry it.",
+  "The edit_file tool asks the user for approval. Call it directly instead of asking for approval in a chat reply.",
+  "Do not modify files except through an approved edit_file call or bash command. If an action is denied, do not retry it.",
   "Use list_files to find files and read_file to inspect their contents.",
 ].join(" ");
 
@@ -94,6 +114,7 @@ export async function runAgent(
   cwd = process.cwd(),
   maxTurns = 25,
   confirmBash: ConfirmBash = async () => false,
+  confirmEdit: ConfirmEdit = async () => false,
 ): Promise<{ answer: string; messages: Message[] }> {
   const systemPrompt = await buildSystemPrompt(cwd);
   const messages: ChatCompletionMessageParam[] = [
@@ -105,7 +126,7 @@ export async function runAgent(
     const response = await client.chat.completions.create({
       model,
       messages,
-      tools: [READ_FILE_TOOL, LIST_FILES_TOOL, BASH_TOOL],
+      tools: [READ_FILE_TOOL, LIST_FILES_TOOL, BASH_TOOL, EDIT_FILE_TOOL],
       tool_choice: "auto",
     });
     const assistant = response.choices[0]?.message;
@@ -139,6 +160,9 @@ export async function runAgent(
               break;
             case "bash":
               result = await bashTool(args, cwd, confirmBash);
+              break;
+            case "edit_file":
+              result = await editFileTool(args, cwd, confirmEdit);
               break;
             default:
               result = `Error: unknown tool ${call.function.name}`;

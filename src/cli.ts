@@ -2,15 +2,15 @@ import { createInterface } from "node:readline/promises";
 import path from "node:path";
 import { createChatClient } from "./llm";
 import { runAgent } from "./loop";
+import type { ConfirmEdit } from "./tools/edit";
 
-export async function confirmBash(
-  command: string,
-  cwd: string,
+export async function confirmUserAction(
+  message: string,
   input: typeof process.stdin = process.stdin,
   output: typeof process.stderr = process.stderr,
 ): Promise<boolean> {
   if (!input.isTTY || !output.isTTY) {
-    output.write("Command approval denied: interactive stdin and stderr are required.\n");
+    output.write("Action approval denied: interactive stdin and stderr are required.\n");
     return false;
   }
   const prompt = createInterface({ input, output });
@@ -29,10 +29,32 @@ export async function confirmBash(
     input.once("end", onInputClosed);
     prompt.once("close", () => finish(false));
     prompt.once("SIGINT", () => finish(false));
-    prompt.question(
-      `Run command ${JSON.stringify(command)} in ${JSON.stringify(path.resolve(cwd))}? [y/N] `,
-    ).then((answer) => finish(answer === "y" || answer === "Y"), () => finish(false));
+    prompt.question(message).then((answer) => finish(answer === "y" || answer === "Y"), () => finish(false));
   });
+}
+
+export function confirmBash(
+  command: string,
+  cwd: string,
+  input: typeof process.stdin = process.stdin,
+  output: typeof process.stderr = process.stderr,
+): Promise<boolean> {
+  return confirmUserAction(
+    `Run command ${JSON.stringify(command)} in ${JSON.stringify(path.resolve(cwd))}? [y/N] `,
+    input,
+    output,
+  );
+}
+
+export function confirmEdit(
+  target: string,
+  oldStr: string,
+  newStr: string,
+  input: typeof process.stdin = process.stdin,
+  output: typeof process.stderr = process.stderr,
+): ReturnType<ConfirmEdit> {
+  const message = `Replace in ${JSON.stringify(target)}: old_str=${JSON.stringify(oldStr)}, new_str=${JSON.stringify(newStr)}? [y/N] `;
+  return confirmUserAction(message, input, output);
 }
 
 async function main() {
@@ -42,7 +64,7 @@ async function main() {
 
   const { client, model } = createChatClient();
   console.log(`You: ${request}`);
-  const { answer } = await runAgent(client, model, request, process.cwd(), 25, confirmBash);
+  const { answer } = await runAgent(client, model, request, process.cwd(), 25, confirmBash, confirmEdit);
   console.log(`Assistant: ${answer}`);
 }
 

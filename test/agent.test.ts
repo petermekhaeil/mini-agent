@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { chmod, mkdtemp, mkdir, realpath, rm, symlink, writeFile } from "node:fs/promises";
+import { chmod, lstat, mkdtemp, mkdir, realpath, rm, symlink, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { PassThrough } from "node:stream";
@@ -12,7 +12,8 @@ import { createChatClient, type ChatClient } from "../src/llm";
 import { listFilesTool } from "../src/tools/list";
 import { readFileTool } from "../src/tools/read";
 import { bashTool } from "../src/tools/bash";
-import { confirmBash } from "../src/cli";
+import { editFileTool } from "../src/tools/edit";
+import { confirmBash, confirmEdit } from "../src/cli";
 
 const temporaryDirectories: string[] = [];
 
@@ -212,6 +213,42 @@ describe("agent tool round-trip", () => {
     expect(calls[1].messages.at(-1)?.content).toContain("stdout:\n2");
     expect(result.answer).toBe("done");
   });
+
+  test("executes edit_file calls with individual confirmations and matching IDs", async () => {
+    const cwd = await tempDir();
+    await writeFile(path.join(cwd, "a.txt"), "A");
+    await writeFile(path.join(cwd, "b.txt"), "B");
+    const calls: ChatCompletionCreateParamsNonStreaming[] = [];
+    const client = mockClient([
+      mockCompletion({
+        role: "assistant",
+        content: null,
+        refusal: null,
+        tool_calls: ["a", "b"].map((name) => ({
+          id: `edit-${name}`,
+          type: "function" as const,
+          function: {
+            name: "edit_file",
+            arguments: JSON.stringify({ path: `${name}.txt`, old_str: name.toUpperCase(), new_str: `${name}!` }),
+          },
+        })),
+      }),
+      mockCompletion({ role: "assistant", content: "done", refusal: null }),
+    ], (request) => calls.push(structuredClone(request)));
+    const approvals: string[] = [];
+    await runAgent(client, "test-model", "edit both", cwd, 25, undefined, async (target) => {
+      approvals.push(target);
+      return true;
+    });
+    const canonicalCwd = await realpath(cwd);
+    expect(approvals).toEqual([path.join(canonicalCwd, "a.txt"), path.join(canonicalCwd, "b.txt")]);
+    expect(calls[1].messages.at(-2)).toMatchObject({ role: "tool", tool_call_id: "edit-a" });
+    expect(calls[1].messages.at(-2)?.content).toContain("Updated");
+    expect(calls[1].messages.at(-1)).toMatchObject({ role: "tool", tool_call_id: "edit-b" });
+    expect(calls[1].messages.at(-1)?.content).toContain("Updated");
+    expect(await Bun.file(path.join(cwd, "a.txt")).text()).toBe("a!");
+    expect(await Bun.file(path.join(cwd, "b.txt")).text()).toBe("b!");
+  });
 });
 
 describe("bash", () => {
@@ -311,6 +348,110 @@ describe("bash", () => {
   });
 });
 
+describe("edit_file", () => {
+  test("replaces one exact occurrence and keeps replacement tokens literal", async () => {
+    const cwd = await tempDir();
+    const target = path.join(await realpath(cwd), "note.txt");
+    await writeFile(target, "before OLD after");
+    const result = await editFileTool(
+      { path: "note.txt", old_str: "OLD", new_str: "$& and $$" },
+      cwd,
+      async (approvedTarget, oldStr, newStr) => {
+        expect(approvedTarget).toBe(target);
+        expect(oldStr).toBe("OLD");
+        expect(newStr).toBe("$& and $$");
+        return true;
+      },
+    );
+    expect(result).toContain("Updated");
+    expect(await Bun.file(target).text()).toBe("before $& and $$ after");
+  });
+
+  test("missing, duplicate, overlapping, or empty old text do not prompt or modify", async () => {
+    const cwd = await tempDir();
+    const target = path.join(cwd, "note.txt");
+    await writeFile(target, "aaa and OLD OLD");
+    let prompts = 0;
+    for (const [old_str, expected] of [["missing", "not found"], ["OLD", "exactly once"], ["aa", "exactly once"], ["", "non-empty"]]) {
+      const result = await editFileTool({ path: "note.txt", old_str, new_str: "changed" }, cwd, async () => { prompts++; return true; });
+      expect(result).toContain(expected);
+      expect(await Bun.file(target).text()).toBe("aaa and OLD OLD");
+    }
+    expect(prompts).toBe(0);
+  });
+
+  test("default denial has no side effects; malformed args do not prompt", async () => {
+    const cwd = await tempDir();
+    const target = path.join(cwd, "existing.txt");
+    await writeFile(target, "old");
+    expect(await editFileTool({ path: "existing.txt", old_str: "old", new_str: "new" }, cwd)).toContain("denied");
+    expect(await editFileTool({ path: "existing.txt", old_str: "old", new_str: "new" }, cwd, async () => false)).toContain("denied");
+    expect(await Bun.file(target).text()).toBe("old");
+    let prompts = 0;
+    for (const args of [null, "bad", {}, { path: "x", old_str: 0, new_str: "" }, { path: "x", old_str: "", new_str: 0 }, { path: "x", old_str: "old", new_str: "\ud800" }]) {
+      expect(await editFileTool(args, cwd, async () => { prompts++; return true; })).toStartWith("Error:");
+    }
+    expect(await editFileTool({ path: "missing.txt", old_str: "old", new_str: "new" }, cwd, async () => { prompts++; return true; })).toStartWith("Error:");
+    expect(prompts).toBe(0);
+  });
+
+  test("rejects missing targets before approval", async () => {
+    const cwd = await tempDir();
+    let prompts = 0;
+    const result = await editFileTool({ path: "missing.txt", old_str: "old", new_str: "new" }, cwd, async () => { prompts++; return true; });
+    expect(result).toStartWith("Error:");
+    expect(prompts).toBe(0);
+    expect(await Bun.file(path.join(cwd, "missing.txt")).exists()).toBe(false);
+  });
+
+  test("rejects traversal, outside symlink targets and symlinked parents", async () => {
+    const parent = await tempDir();
+    const cwd = path.join(parent, "work");
+    const outside = path.join(parent, "outside");
+    await mkdir(cwd);
+    await mkdir(outside);
+    const outsideFile = path.join(outside, "secret.txt");
+    await writeFile(outsideFile, "secret");
+    await symlink(outsideFile, path.join(cwd, "linked.txt"));
+    await symlink(outside, path.join(cwd, "linked-dir"));
+    const brokenLink = path.join(cwd, "broken.txt");
+    await symlink(path.join(outside, "missing.txt"), brokenLink);
+    const confirm = async () => true;
+    expect(await editFileTool({ path: "../outside/secret.txt", old_str: "secret", new_str: "x" }, cwd, confirm)).toStartWith("Error:");
+    expect(await editFileTool({ path: "linked.txt", old_str: "secret", new_str: "x" }, cwd, confirm)).toStartWith("Error:");
+    expect(await editFileTool({ path: "linked-dir/new.txt", old_str: "x", new_str: "y" }, cwd, confirm)).toStartWith("Error:");
+    expect(await editFileTool({ path: "broken.txt", old_str: "x", new_str: "y" }, cwd, confirm)).toStartWith("Error:");
+    expect((await lstat(brokenLink)).isSymbolicLink()).toBe(true);
+    expect(await Bun.file(outsideFile).text()).toBe("secret");
+  });
+
+  test("rejects invalid UTF-8 before approval", async () => {
+    const cwd = await tempDir();
+    const target = path.join(cwd, "invalid.txt");
+    const invalid = Buffer.concat([Buffer.from([0xff]), Buffer.from("OLD")]);
+    await writeFile(target, invalid);
+    let prompts = 0;
+    const initial = await editFileTool({ path: "invalid.txt", old_str: "OLD", new_str: "NEW" }, cwd, async () => { prompts++; return true; });
+    expect(initial).toContain("valid UTF-8");
+    expect(prompts).toBe(0);
+    expect(await Bun.file(target).bytes()).toEqual(invalid);
+  });
+
+  test("preserves a valid UTF-8 BOM and permits empty replacement", async () => {
+    const cwd = await tempDir();
+    const bomFile = path.join(cwd, "bom.txt");
+    const bom = Buffer.from([0xef, 0xbb, 0xbf]);
+    await writeFile(bomFile, Buffer.concat([bom, Buffer.from("OLD")]));
+    const replaced = await editFileTool({ path: "bom.txt", old_str: "OLD", new_str: "NEW" }, cwd, async () => true);
+    expect(replaced).toContain("Updated");
+    expect(await Bun.file(bomFile).bytes()).toEqual(Buffer.concat([bom, Buffer.from("NEW")]));
+
+    const emptied = await editFileTool({ path: "bom.txt", old_str: "NEW", new_str: "" }, cwd, async () => true);
+    expect(emptied).toContain("Updated");
+    expect(await Bun.file(bomFile).bytes()).toEqual(bom);
+  });
+});
+
 describe("CLI bash confirmation", () => {
   function ttyPair() {
     const input = new PassThrough() as PassThrough & { isTTY: boolean };
@@ -373,6 +514,39 @@ describe("CLI bash confirmation", () => {
     expect(await pending).toBe(false);
     input.destroy();
     output.destroy();
+  });
+
+  test("edit prompt shows escaped full replacement and requires y/Y", async () => {
+    const { input, output } = ttyPair();
+    let shown = "";
+    output.on("data", (chunk) => { shown += chunk.toString(); });
+    const oldStr = 'old\n"text"';
+    const newStr = 'new $& and $$';
+    const pending = confirmEdit("/work/a.txt", oldStr, newStr, input as unknown as typeof process.stdin, output as unknown as typeof process.stderr);
+    input.write("Y\n");
+    expect(await pending).toBe(true);
+    expect(shown).toContain(JSON.stringify("/work/a.txt"));
+    expect(shown).toContain(JSON.stringify(oldStr));
+    expect(shown).toContain(JSON.stringify(newStr));
+    input.destroy();
+    output.destroy();
+
+    const nonTTY = new PassThrough();
+    const ttyOutput = new PassThrough() as PassThrough & { isTTY: boolean };
+    Object.defineProperty(ttyOutput, "isTTY", { value: true });
+    let denialMessage = "";
+    ttyOutput.on("data", (chunk) => { denialMessage += chunk.toString(); });
+    expect(await confirmEdit("/work/a.txt", "", "new", nonTTY as unknown as typeof process.stdin, ttyOutput as unknown as typeof process.stderr)).toBe(false);
+    expect(denialMessage).toContain("Action approval denied");
+    nonTTY.destroy();
+    ttyOutput.destroy();
+
+    const { input: noInput, output: noOutput } = ttyPair();
+    const denied = confirmEdit("/work/a.txt", "old", "new", noInput as unknown as typeof process.stdin, noOutput as unknown as typeof process.stderr);
+    noInput.write("n\n");
+    expect(await denied).toBe(false);
+    noInput.destroy();
+    noOutput.destroy();
   });
 });
 
