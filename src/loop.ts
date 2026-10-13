@@ -69,7 +69,7 @@ export const BASH_TOOL = {
   type: "function" as const,
   function: {
     name: "bash",
-    description: "Request a shell command in the working directory. Call this tool directly; it asks the user for approval before running.",
+    description: "Run a shell command in the working directory. Call this tool directly when useful; it requests terminal approval before running.",
     parameters: {
       type: "object",
       properties: {
@@ -85,7 +85,7 @@ export const EDIT_FILE_TOOL = {
   type: "function" as const,
   function: {
     name: "edit_file",
-    description: "Replace one exact, unique text occurrence in an existing UTF-8 text file after user approval. Call this tool directly to request approval.",
+    description: "Replace one exact, unique text occurrence in an existing UTF-8 text file. Call this tool directly when useful; it requests terminal approval before editing.",
     parameters: {
       type: "object",
       properties: {
@@ -102,12 +102,10 @@ export const EDIT_FILE_TOOL = {
 export type Message = ChatCompletionMessageParam | ChatCompletionMessage;
 
 const SYSTEM_PROMPT = [
-  "You are a coding assistant. Use bash when a shell command would help.",
-  "Inspect the codebase to answer the user's request.",
-  "The bash tool asks the user for approval. Call it directly instead of asking for approval in a chat reply.",
-  "The edit_file tool asks the user for approval. Call it directly instead of asking for approval in a chat reply.",
-  "Do not modify files except through an approved edit_file call or bash command. If an action is denied, do not retry it.",
-  "Use code_search to find matching code, list_files to find file paths, and read_file to inspect file contents.",
+  "You are a coding assistant. Inspect the project, then answer the user's request.",
+  "Use code_search, list_files, and read_file for read-only discovery.",
+  "When a command or edit would help, call bash or edit_file directly instead of asking approval in chat.",
+  "Change files only through approved bash or edit_file calls. Never retry a denied action.",
 ].join(" ");
 
 async function buildSystemPrompt(cwd: string): Promise<string> {
@@ -134,12 +132,14 @@ export async function runAgent(
   maxTurns = 25,
   confirmBash: ConfirmBash = async () => false,
   confirmEdit: ConfirmEdit = async () => false,
-): Promise<{ answer: string; messages: Message[] }> {
-  const systemPrompt = await buildSystemPrompt(cwd);
-  const messages: ChatCompletionMessageParam[] = [
-    { role: "system", content: systemPrompt },
-    { role: "user", content: request },
-  ];
+  history?: ChatCompletionMessageParam[],
+): Promise<{ answer: string; messages: ChatCompletionMessageParam[] }> {
+  const messages: ChatCompletionMessageParam[] = history?.length
+    ? [...history, { role: "user", content: request }]
+    : [
+        { role: "system", content: await buildSystemPrompt(cwd) },
+        { role: "user", content: request },
+      ];
 
   for (let turn = 0; turn < maxTurns; turn++) {
     const response = await client.chat.completions.create({

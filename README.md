@@ -16,6 +16,18 @@ bun run start "Find the code that limits directory listings. How many paths can 
 
 The default model is `gpt-4o-mini`. Set `AGENT_MODEL` to use another OpenAI model. You can also pipe a request: `echo "Read README.md" | bun run start`.
 
+Run `bun run start` with no arguments in a terminal to start a conversational REPL:
+
+```text
+You: Find where directory listings are limited.
+Assistant: ...
+You: /new
+Conversation reset.
+You: /exit
+```
+
+`/new` starts a fresh conversation (and reloads `AGENT.md` on the next request); `/exit` or Ctrl-D exits. Conversation history is only kept in memory until the process exits. Passing a request argument or piping stdin still runs one request and exits.
+
 Run it in a directory without secrets. `read_file` sends requested file contents to OpenAI, and `code_search` sends matching lines. The CLI prints only your request and the final answer, apart from approval prompts. File paths are checked against the working directory, but approved shell commands can leave it and inherit environment variables, including `OPENAI_API_KEY`. Neither confirmation nor the working directory is a sandbox.
 
 Before each `bash` command or `edit_file` change, the CLI shows what will run or change and asks for `y` or `Y`. Piped input cannot approve an action. `bash` uses blocking `Bun.spawnSync`, so it blocks the JavaScript event loop until the command exits or its 30-second timeout. The timeout sends `SIGKILL` to the shell process; child processes may survive. The tool truncates the returned text to 8,000 characters, but `spawnSync` captures full stdout and stderr first, so this is not a memory limit.
@@ -30,25 +42,26 @@ sequenceDiagram
     participant OpenAI
     participant Tools as list_files / read_file / code_search / edit_file / bash
 
-    User->>CLI: Request
-    CLI->>Agent: runAgent(request)
-    loop Until the model gives a final answer (max 25 turns)
-        Agent->>OpenAI: messages + tool descriptions
-        OpenAI-->>Agent: assistant message
-        Agent->>Agent: append full assistant message
-        opt assistant requests tools
-            loop for each tool call
-                Agent->>Tools: run JSON arguments (bash/edit_file require approval)
-                Tools-->>Agent: result or error
-                Agent->>Agent: append result with matching tool_call_id
+    User->>CLI: Request (interactive, argument, or piped input)
+    CLI->>Agent: runAgent(request, history if in REPL)
+    loop Until final answer (max 25 model turns per request)
+        Agent->>OpenAI: Messages + tool descriptions
+        OpenAI-->>Agent: Assistant message
+        Agent->>Agent: Keep full assistant message
+        opt Assistant requests tools
+            loop For each tool call
+                Agent->>Tools: Run arguments (bash/edit_file require approval)
+                Tools-->>Agent: Result or error
+                Agent->>Agent: Append result with matching tool_call_id
             end
         end
     end
-    Agent-->>CLI: answer + messages
-    CLI-->>User: print request and final answer
+    Agent-->>CLI: Answer + updated history
+    CLI-->>User: Print final answer
+    Note over User,CLI: REPL repeats this cycle with history; /new clears it. One-shot runs once.
 ```
 
-`src/loop.ts` keeps the full assistant tool call in the conversation. Each result goes back with the same `tool_call_id`, so OpenAI knows which call it answers.
+In the REPL, each request uses the conversation history, so later requests can refer to earlier turns; `/new` clears that history. `src/loop.ts` keeps the full assistant tool call in the conversation. Each result goes back with the same `tool_call_id`, so OpenAI knows which call it answers.
 
 - `list_files` returns up to 200 paths. It skips `.git`, `node_modules`, and symlinks, and stops walking when it finds a 201st file.
 - `read_file` returns raw text and stays inside the working directory, limiting results to 8,000 characters.
@@ -58,7 +71,7 @@ sequenceDiagram
 
 For example, ask the agent: `Search src for TODO comments in TypeScript files` to have it call `code_search` with a pattern, path, and glob.
 
-If there is an `AGENT.md` in the working directory, the loop adds it to the system prompt. The CLI handles one request at a time. There is no REPL or line-range reader. Approved shell commands can still change files; see [BACKLOG.md](BACKLOG.md) for edit race and write-failure limitations.
+If there is an `AGENT.md` in the working directory, the loop adds it to each new conversation's system prompt. The CLI handles one request at a time. Approved shell commands can still change files; see [BACKLOG.md](BACKLOG.md) for edit race and write-failure limitations.
 
 ## Check it
 

@@ -14,7 +14,7 @@ import { readFileTool } from "../src/tools/read";
 import { bashTool } from "../src/tools/bash";
 import { editFileTool } from "../src/tools/edit";
 import { codeSearchTool } from "../src/tools/search";
-import { confirmBash, confirmEdit } from "../src/cli";
+import { confirmBash, confirmEdit, createTerminalInput, runRepl } from "../src/cli";
 
 const temporaryDirectories: string[] = [];
 
@@ -69,6 +69,38 @@ function mockClient(
 }
 
 describe("agent tool round-trip", () => {
+  test("reuses a copied history with one system message and complete tool turns", async () => {
+    const cwd = await tempDir();
+    await writeFile(path.join(cwd, "note.txt"), "remembered result");
+    const first = await runAgent(mockClient([
+      mockCompletion({
+        role: "assistant",
+        content: null,
+        refusal: null,
+        tool_calls: [{
+          id: "history-read",
+          type: "function",
+          function: { name: "read_file", arguments: '{"path":"note.txt"}' },
+        }],
+      }),
+      mockCompletion({ role: "assistant", content: "First answer", refusal: null }),
+    ]), "test-model", "first request", cwd);
+    const history = first.messages;
+    const originalHistory = structuredClone(history);
+    let secondRequest: ChatCompletionCreateParamsNonStreaming | undefined;
+    await runAgent(mockClient([
+      mockCompletion({ role: "assistant", content: "Second answer", refusal: null }),
+    ], (request) => { secondRequest = structuredClone(request); }), "test-model", "second request", cwd, 25, undefined, undefined, history);
+
+    expect(history).toEqual(originalHistory);
+    expect(secondRequest?.messages).toHaveLength(history.length + 1);
+    expect(secondRequest?.messages.slice(0, history.length)).toEqual(history);
+    expect(secondRequest?.messages.at(-1)).toEqual({ role: "user", content: "second request" });
+    expect(secondRequest?.messages.filter((message) => message.role === "system")).toHaveLength(1);
+    expect(secondRequest?.messages).toContainEqual(expect.objectContaining({ role: "tool", tool_call_id: "history-read", content: "remembered result" }));
+    expect(secondRequest?.messages).toContainEqual(expect.objectContaining({ role: "assistant", tool_calls: expect.any(Array) }));
+  });
+
   test("sends a matching read_file result and keeps the full assistant tool call", async () => {
     const cwd = await tempDir();
     await writeFile(path.join(cwd, "note.txt"), "hello\nworld\n");
@@ -119,6 +151,16 @@ describe("agent tool round-trip", () => {
       role: "user",
       content: "Read note.txt",
     });
+    const systemPrompt = String(result.messages[0].content);
+    expect(systemPrompt).toContain("Use code_search, list_files, and read_file for read-only discovery.");
+    expect(systemPrompt).toContain("call bash or edit_file directly instead of asking approval in chat");
+    expect(systemPrompt).toContain("Never retry a denied action.");
+    const toolDescriptions = calls[0].tools
+      ?.filter((tool) => tool.type === "function")
+      .map((tool) => tool.function.description)
+      .join(" ");
+    expect(toolDescriptions).toContain("requests terminal approval before running");
+    expect(toolDescriptions).toContain("requests terminal approval before editing");
     expect(result.messages[2]).toEqual(assistantToolCall);
     expect(calls[1].messages.at(-1)).toEqual({
       role: "tool",
@@ -545,23 +587,22 @@ describe("CLI bash confirmation", () => {
 
   test("settles false on input close instead of leaving approval pending", async () => {
     const { input, output } = ttyPair();
-    const pending = confirmBash(
-      "touch sentinel",
-      "/work",
-      input as unknown as typeof process.stdin,
-      output as unknown as typeof process.stderr,
-    );
+    const terminal = createTerminalInput(input as unknown as typeof process.stdin, output as unknown as typeof process.stderr);
+    const pending = confirmBash("touch sentinel", "/work", terminal.ask);
     input.destroy();
     expect(await pending).toBe(false);
+    terminal.close();
     output.destroy();
   });
 
   test("accepts only y or Y", async () => {
     for (const [reply, expected] of [["y\n", true], ["Y\n", true], ["yes\n", false], ["\n", false]] as const) {
       const { input, output } = ttyPair();
-      const pending = confirmBash("pwd", "/work", input as unknown as typeof process.stdin, output as unknown as typeof process.stderr);
+      const terminal = createTerminalInput(input as unknown as typeof process.stdin, output as unknown as typeof process.stderr);
+      const pending = confirmBash("pwd", "/work", terminal.ask);
       input.write(reply);
       expect(await pending).toBe(expected);
+      terminal.close();
       input.destroy();
       output.destroy();
     }
@@ -570,30 +611,31 @@ describe("CLI bash confirmation", () => {
   test("denies non-interactive input without waiting for a reply", async () => {
     const input = new PassThrough();
     const { output } = ttyPair();
+    const terminal = createTerminalInput(input as unknown as typeof process.stdin, output as unknown as typeof process.stderr);
     input.write("y\n");
-    expect(await confirmBash("pwd", "/work", input as unknown as typeof process.stdin, output as unknown as typeof process.stderr)).toBe(false);
+    expect(await confirmBash("pwd", "/work", terminal.ask)).toBe(false);
+    terminal.close();
     input.destroy();
     output.destroy();
   });
 
   test("settles false on input EOF", async () => {
     const { input, output } = ttyPair();
-    const pending = confirmBash("pwd", "/work", input as unknown as typeof process.stdin, output as unknown as typeof process.stderr);
+    const terminal = createTerminalInput(input as unknown as typeof process.stdin, output as unknown as typeof process.stderr);
+    const pending = confirmBash("pwd", "/work", terminal.ask);
     input.end();
     expect(await pending).toBe(false);
+    terminal.close();
     output.destroy();
   });
 
   test("settles false on Ctrl-C", async () => {
     const { input, output } = ttyPair();
-    const pending = confirmBash(
-      "touch sentinel",
-      "/work",
-      input as unknown as typeof process.stdin,
-      output as unknown as typeof process.stderr,
-    );
+    const terminal = createTerminalInput(input as unknown as typeof process.stdin, output as unknown as typeof process.stderr);
+    const pending = confirmBash("touch sentinel", "/work", terminal.ask);
     input.emit("keypress", "\u0003", { ctrl: true, name: "c" });
     expect(await pending).toBe(false);
+    terminal.close();
     input.destroy();
     output.destroy();
   });
@@ -604,12 +646,14 @@ describe("CLI bash confirmation", () => {
     output.on("data", (chunk) => { shown += chunk.toString(); });
     const oldStr = 'old\n"text"';
     const newStr = 'new $& and $$';
-    const pending = confirmEdit("/work/a.txt", oldStr, newStr, input as unknown as typeof process.stdin, output as unknown as typeof process.stderr);
+    const terminal = createTerminalInput(input as unknown as typeof process.stdin, output as unknown as typeof process.stderr);
+    const pending = confirmEdit("/work/a.txt", oldStr, newStr, terminal.ask);
     input.write("Y\n");
     expect(await pending).toBe(true);
     expect(shown).toContain(JSON.stringify("/work/a.txt"));
     expect(shown).toContain(JSON.stringify(oldStr));
     expect(shown).toContain(JSON.stringify(newStr));
+    terminal.close();
     input.destroy();
     output.destroy();
 
@@ -618,17 +662,96 @@ describe("CLI bash confirmation", () => {
     Object.defineProperty(ttyOutput, "isTTY", { value: true });
     let denialMessage = "";
     ttyOutput.on("data", (chunk) => { denialMessage += chunk.toString(); });
-    expect(await confirmEdit("/work/a.txt", "", "new", nonTTY as unknown as typeof process.stdin, ttyOutput as unknown as typeof process.stderr)).toBe(false);
+    const nonInteractive = createTerminalInput(nonTTY as unknown as typeof process.stdin, ttyOutput as unknown as typeof process.stderr);
+    expect(await confirmEdit("/work/a.txt", "", "new", nonInteractive.ask)).toBe(false);
     expect(denialMessage).toContain("Action approval denied");
+    nonInteractive.close();
     nonTTY.destroy();
     ttyOutput.destroy();
 
     const { input: noInput, output: noOutput } = ttyPair();
-    const denied = confirmEdit("/work/a.txt", "old", "new", noInput as unknown as typeof process.stdin, noOutput as unknown as typeof process.stderr);
+    const noInputTerminal = createTerminalInput(noInput as unknown as typeof process.stdin, noOutput as unknown as typeof process.stderr);
+    const denied = confirmEdit("/work/a.txt", "old", "new", noInputTerminal.ask);
     noInput.write("n\n");
     expect(await denied).toBe(false);
+    noInputTerminal.close();
     noInput.destroy();
     noOutput.destroy();
+  });
+});
+
+describe("interactive REPL", () => {
+  function ttyPair() {
+    const input = new PassThrough() as PassThrough & { isTTY: boolean };
+    const output = new PassThrough() as PassThrough & { isTTY: boolean };
+    Object.defineProperty(input, "isTTY", { value: true });
+    Object.defineProperty(output, "isTTY", { value: true });
+    return { input, output };
+  }
+
+  test("keeps one reader for user turns and approvals, and /new resets history", async () => {
+    const cwd = await tempDir();
+    const createBashCall = (id: string, command: string) => mockCompletion({
+      role: "assistant",
+      content: null,
+      refusal: null,
+      tool_calls: [{ id, type: "function", function: { name: "bash", arguments: JSON.stringify({ command }) } }],
+    });
+    const requests: ChatCompletionCreateParamsNonStreaming[] = [];
+    const client = mockClient([
+      createBashCall("approved", "echo approved"),
+      mockCompletion({ role: "assistant", content: "First answer", refusal: null }),
+      createBashCall("denied", "echo denied"),
+      mockCompletion({ role: "assistant", content: "Second answer", refusal: null }),
+      mockCompletion({ role: "assistant", content: "Fresh answer", refusal: null }),
+    ], (request) => requests.push(structuredClone(request)));
+    const { input, output } = ttyPair();
+    const prompts: [string, string][] = [
+      ["You: ", "first request\n"],
+      [`Run command ${JSON.stringify("echo approved")} in ${JSON.stringify(path.resolve(cwd))}? [y/N] `, "y\n"],
+      ["You: ", "second request\n"],
+      [`Run command ${JSON.stringify("echo denied")} in ${JSON.stringify(path.resolve(cwd))}? [y/N] `, "n\n"],
+      ["You: ", "/new\n"],
+      ["You: ", "fresh request\n"],
+      ["You: ", "/exit\n"],
+    ];
+    let transcript = "";
+    let pendingOutput = "";
+    output.on("data", (chunk) => {
+      const text = chunk.toString();
+      transcript += text;
+      pendingOutput += text;
+      while (prompts.length > 0) {
+        const [prompt, reply] = prompts[0];
+        const index = pendingOutput.indexOf(prompt);
+        if (index < 0) break;
+        pendingOutput = pendingOutput.slice(index + prompt.length);
+        prompts.shift();
+        queueMicrotask(() => input.write(reply));
+      }
+    });
+
+    await runRepl(client, "test-model", cwd, input as unknown as typeof process.stdin, output as unknown as typeof process.stderr, output as unknown as typeof process.stdout);
+
+    expect(prompts).toHaveLength(0);
+    expect(requests[2].messages.at(-1)).toEqual({ role: "user", content: "second request" });
+    expect(requests[2].messages.filter((message) => message.role === "system")).toHaveLength(1);
+    expect(requests[3].messages.at(-1)?.content).toContain("Command denied");
+    expect(requests[4].messages).toHaveLength(2);
+    expect(requests[4].messages.at(-1)).toEqual({ role: "user", content: "fresh request" });
+    expect(transcript).toContain("Conversation reset.");
+    expect(transcript).toContain("Assistant: Fresh answer");
+    input.destroy();
+    output.destroy();
+  });
+
+  test("exits cleanly when Ctrl-D closes input", async () => {
+    const { input, output } = ttyPair();
+    const client = mockClient([]);
+    const pending = runRepl(client, "test-model", "/unused", input as unknown as typeof process.stdin, output as unknown as typeof process.stderr, output as unknown as typeof process.stdout);
+    input.emit("end");
+    await pending;
+    output.destroy();
   });
 });
 
