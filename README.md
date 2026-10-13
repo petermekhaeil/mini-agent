@@ -28,7 +28,20 @@ You: /exit
 
 `/new` starts a fresh conversation (and reloads `AGENT.md` on the next request); `/exit` or Ctrl-D exits. Conversation history is only kept in memory until the process exits. Passing a request argument or piping stdin still runs one request and exits.
 
-Run it in a directory without secrets. `read_file` sends requested file contents to OpenAI, and `code_search` sends matching lines. The CLI prints only your request and the final answer, apart from approval prompts. File paths are checked against the working directory, but approved shell commands can leave it and inherit environment variables, including `OPENAI_API_KEY`. Neither confirmation nor the working directory is a sandbox.
+## Token meter
+
+Each model call is recorded from the response's `prompt_tokens`, `completion_tokens`, and `prompt_tokens_details.cached_tokens` usage fields:
+
+```text
+[turn 1] in 4,210 (cached 3,900) · out 182 · session 4,392
+[turn 2] in 4,380 (cached 4,100) · out 96 · session 8,868
+```
+
+The first call's `in` count includes the system prompt, tool definitions, and first user message; it is only available after that API response.
+
+In the REPL, `/tokens` uses `Bun.inspect.table()` to print a per-call table and session totals without making a model call. `/new` clears both conversation history and token totals. Unknown or missing usage fields appear as `n/a` (and make their corresponding totals unknown), never as zero. Cached tokens are a subset of prompt tokens, not an additional amount. No cost estimate is shown. One-shot and piped requests use a fresh meter and keep the conversation answer on stdout; meter lines go to stderr.
+
+Run it in a directory without secrets. `read_file` sends requested file contents to OpenAI, and `code_search` sends matching lines. Conversation output stays on stdout; approvals and token-meter lines/status stay on stderr. File paths are checked against the working directory, but approved shell commands can leave it and inherit environment variables, including `OPENAI_API_KEY`. Neither confirmation nor the working directory is a sandbox.
 
 Before each `bash` command or `edit_file` change, the CLI shows what will run or change and asks for `y` or `Y`. Piped input cannot approve an action. `bash` uses blocking `Bun.spawnSync`, so it blocks the JavaScript event loop until the command exits or its 30-second timeout. The timeout sends `SIGKILL` to the shell process; child processes may survive. The tool truncates the returned text to 8,000 characters, but `spawnSync` captures full stdout and stderr first, so this is not a memory limit.
 

@@ -15,6 +15,7 @@ import { bashTool } from "../src/tools/bash";
 import { editFileTool } from "../src/tools/edit";
 import { codeSearchTool } from "../src/tools/search";
 import { confirmBash, confirmEdit, createTerminalInput, runRepl } from "../src/cli";
+import { TokenMeter, formatTokenReport } from "../src/tokens";
 
 const temporaryDirectories: string[] = [];
 
@@ -33,12 +34,14 @@ afterEach(async () => {
 
 function mockCompletion(
   message: ChatCompletion["choices"][number]["message"],
+  usage?: ChatCompletion["usage"],
 ): ChatCompletion {
   return {
     id: "test-completion",
     created: 0,
     model: "test-model",
     object: "chat.completion",
+    usage,
     choices: [
       {
         finish_reason: message.tool_calls?.length ? "tool_calls" : "stop",
@@ -49,6 +52,48 @@ function mockCompletion(
     ],
   };
 }
+
+describe("token meter", () => {
+  test("records each model call and propagates unknown usage without treating zero as missing", async () => {
+    const meter = new TokenMeter();
+    const lines: string[] = [];
+    await runAgent(mockClient([
+      mockCompletion({ role: "assistant", content: null, refusal: null, tool_calls: [{
+        id: "read", type: "function", function: { name: "read_file", arguments: '{"path":"absent"}' },
+      }] }, { prompt_tokens: 4210, completion_tokens: 0, total_tokens: 4210, prompt_tokens_details: { cached_tokens: 3900 } }),
+      mockCompletion({ role: "assistant", content: "done", refusal: null }, { prompt_tokens: 0, completion_tokens: 182, total_tokens: 182, prompt_tokens_details: {} }),
+    ]), "test-model", "read absent", await tempDir(), 25, undefined, undefined, undefined, meter, (line) => lines.push(line));
+    expect(meter.turns).toEqual([
+      { turn: 1, prompt: 4210, cached: 3900, completion: 0 },
+      { turn: 2, prompt: 0, cached: null, completion: 182 },
+    ]);
+    expect(meter.totals).toEqual({ prompt: 4210, cached: null, completion: 182, total: 4392 });
+    expect(lines[0]).toContain("[turn 1] in 4,210 (cached 3,900) · out 0");
+    expect(lines).toHaveLength(2);
+    expect(lines.every((line) => line.startsWith("[turn "))).toBe(true);
+    const report = formatTokenReport(meter);
+    expect(report).toContain("left column = turn");
+    expect(report).toContain("1");
+    expect(report).toContain("4,210");
+    expect(report).toContain("3,900");
+    expect(report).toContain("n/a");
+    expect(report).toContain("182");
+  });
+
+  test("records missing usage as unknown and reset clears calls", async () => {
+    const meter = new TokenMeter();
+    const messages: string[] = [];
+    const noMessage = mockCompletion({ role: "assistant", content: null, refusal: null });
+    noMessage.choices = [];
+    await expect(runAgent(mockClient([noMessage]), "test-model", "request", await tempDir(), 1, undefined, undefined, undefined, meter, (line) => messages.push(line))).rejects.toThrow("no assistant message");
+    expect(meter.totals).toEqual({ prompt: null, cached: null, completion: null, total: null });
+    expect(messages[0]).toContain("[turn 1]");
+    meter.reset();
+    expect(meter.turns).toHaveLength(0);
+    expect(formatTokenReport(meter)).toContain("No model calls yet.");
+    expect(formatTokenReport(meter)).toContain("Session totals: in 0 (cached 0) · out 0 · total 0");
+  });
+});
 
 function mockClient(
   responses: ChatCompletion[],
@@ -752,6 +797,54 @@ describe("interactive REPL", () => {
     input.emit("end");
     await pending;
     output.destroy();
+  });
+
+  test("/tokens reports calls without a model request; /new resets the meter and routes status to stderr", async () => {
+    const cwd = await tempDir();
+    const input = new PassThrough() as PassThrough & { isTTY: boolean };
+    const stderr = new PassThrough() as PassThrough & { isTTY: boolean };
+    const stdout = new PassThrough();
+    Object.defineProperty(input, "isTTY", { value: true });
+    Object.defineProperty(stderr, "isTTY", { value: true });
+    const client = mockClient([
+      mockCompletion({ role: "assistant", content: "one", refusal: null }, { prompt_tokens: 20, completion_tokens: 3, total_tokens: 23, prompt_tokens_details: { cached_tokens: 0 } }),
+      mockCompletion({ role: "assistant", content: "two", refusal: null }, { prompt_tokens: 25, completion_tokens: 4, total_tokens: 29, prompt_tokens_details: { cached_tokens: 5 } }),
+      mockCompletion({ role: "assistant", content: "fresh", refusal: null }, { prompt_tokens: 7, completion_tokens: 2, total_tokens: 9, prompt_tokens_details: { cached_tokens: 0 } }),
+    ]);
+    let err = "";
+    let out = "";
+    stderr.on("data", (chunk) => { err += chunk.toString(); });
+    stdout.on("data", (chunk) => { out += chunk.toString(); });
+    const prompts: [string, string][] = [
+      ["You: ", "first\n"], ["You: ", "/tokens\n"], ["You: ", "second\n"],
+      ["You: ", "/new\n"], ["You: ", "fresh\n"], ["You: ", "/tokens\n"], ["You: ", "/exit\n"],
+    ];
+    let pending = "";
+    stderr.on("data", (chunk) => {
+      pending += chunk.toString();
+      while (prompts.length && pending.includes(prompts[0][0])) {
+        pending = pending.slice(pending.indexOf(prompts[0][0]) + prompts[0][0].length);
+        const [, reply] = prompts.shift()!;
+        queueMicrotask(() => input.write(reply));
+      }
+    });
+    await runRepl(client, "test-model", cwd, input as unknown as typeof process.stdin, stderr as unknown as typeof process.stderr, stdout as unknown as typeof process.stdout);
+    expect(prompts).toHaveLength(0);
+    expect(err).toContain("│ 1 │ 20");
+    expect(err).toContain("[turn 2] in 25 (cached 5) · out 4 · session 52");
+    expect(err).toContain("[turn 2] in 25 (cached 5) · out 4");
+    expect(err).toContain("Conversation reset.");
+    expect(err).toContain("Session totals: in 7 (cached 0) · out 2 · total 9");
+    expect((err.match(/\[turn 1\]/g) ?? [])).toHaveLength(2);
+    expect(err).not.toContain("initial prompt");
+    expect(err).toContain("│ 1 │ 7");
+    expect(out).toContain("Assistant: one");
+    expect(out).toContain("Assistant: two");
+    expect(out).toContain("Assistant: fresh");
+    expect(out).not.toContain("Conversation reset");
+    expect(out).not.toContain("Tokens per model call");
+    expect(err).toContain("\u001b[2m");
+    input.destroy(); stderr.destroy(); stdout.destroy();
   });
 });
 

@@ -8,6 +8,7 @@ import { readConfinedFile, readFileTool } from "./tools/read";
 import { bashTool, type ConfirmBash } from "./tools/bash";
 import { editFileTool, type ConfirmEdit } from "./tools/edit";
 import { codeSearchTool } from "./tools/search";
+import { TokenMeter, formatTokenCall } from "./tokens";
 
 export const READ_FILE_TOOL = {
   type: "function" as const,
@@ -133,6 +134,8 @@ export async function runAgent(
   confirmBash: ConfirmBash = async () => false,
   confirmEdit: ConfirmEdit = async () => false,
   history?: ChatCompletionMessageParam[],
+  meter: TokenMeter = new TokenMeter(),
+  reportTokens?: (line: string) => void,
 ): Promise<{ answer: string; messages: ChatCompletionMessageParam[] }> {
   const messages: ChatCompletionMessageParam[] = history?.length
     ? [...history, { role: "user", content: request }]
@@ -148,6 +151,8 @@ export async function runAgent(
       tools: [READ_FILE_TOOL, LIST_FILES_TOOL, CODE_SEARCH_TOOL, BASH_TOOL, EDIT_FILE_TOOL],
       tool_choice: "auto",
     });
+    const recorded = meter.record(response.usage);
+    reportTokens?.(formatTokenCall(recorded, meter.totals.total));
     const assistant = response.choices[0]?.message;
     if (!assistant) {
       throw new Error("Model returned no assistant message");

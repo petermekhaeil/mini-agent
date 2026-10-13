@@ -5,6 +5,7 @@ import type { ChatClient } from "./llm";
 import { runAgent } from "./loop";
 import type { ConfirmEdit } from "./tools/edit";
 import type { ChatCompletionMessageParam } from "openai/resources/chat/completions";
+import { TokenMeter, formatTokenReport } from "./tokens";
 
 export type Ask = (prompt: string) => Promise<string | undefined>;
 
@@ -92,6 +93,7 @@ export async function runRepl(
 ): Promise<void> {
   const terminal = createTerminalInput(input, promptOutput);
   let history: ChatCompletionMessageParam[] | undefined;
+  const meter = new TokenMeter();
   try {
     while (true) {
       const request = await terminal.ask("You: ");
@@ -99,9 +101,14 @@ export async function runRepl(
       const trimmed = request.trim();
       if (!trimmed) continue;
       if (trimmed === "/exit") return;
+      if (trimmed === "/tokens") {
+        promptOutput.write(formatTokenReport(meter));
+        continue;
+      }
       if (trimmed === "/new") {
         history = undefined;
-        answerOutput.write("Conversation reset.\n");
+        meter.reset();
+        promptOutput.write("Conversation reset.\n");
         continue;
       }
 
@@ -114,6 +121,8 @@ export async function runRepl(
         (command, workdir) => confirmBash(command, workdir, terminal.ask),
         (target, oldStr, newStr) => confirmEdit(target, oldStr, newStr, terminal.ask),
         history,
+        meter,
+        (line) => promptOutput.write(`${promptOutput.isTTY ? `\u001b[2m${line}\u001b[0m` : line}\n`),
       );
       history = result.messages;
       answerOutput.write(`Assistant: ${result.answer}\n`);
@@ -148,6 +157,9 @@ async function main(): Promise<void> {
       25,
       terminal ? (command, cwd) => confirmBash(command, cwd, terminal.ask) : undefined,
       terminal ? (target, oldStr, newStr) => confirmEdit(target, oldStr, newStr, terminal.ask) : undefined,
+      undefined,
+      new TokenMeter(),
+      (line) => process.stderr.write(`${process.stderr.isTTY ? `\u001b[2m${line}\u001b[0m` : line}\n`),
     );
     console.log(`Assistant: ${answer}`);
   } finally {
