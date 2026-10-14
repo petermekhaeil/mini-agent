@@ -8,7 +8,7 @@
     "start": "bun src/cli.ts"
   },
   "dependencies": {
-    "openai": "^5.12.2"
+    "openai": "^7.32.0"
   },
   "devDependencies": {
     "@types/bun": "^1.2.21",

@@ -1,13 +1,18 @@
 import { createInterface } from "node:readline/promises";
 import path from "node:path";
 import { createChatClient } from "./llm";
-import type { ChatClient } from "./llm";
+import type { Provider } from "./llm";
 import { runAgent } from "./loop";
+import type { RunAgentOptions } from "./loop";
 import type { ConfirmEdit } from "./tools/edit";
 import type { ChatCompletionMessageParam } from "openai/resources/chat/completions";
 import { TokenMeter, formatTokenReport } from "./tokens";
 
 export type Ask = (prompt: string) => Promise<string | undefined>;
+
+export function formatProviderModel(provider: Provider, model: string): string {
+  return `Provider: ${provider} · Model: ${model}\n`;
+}
 
 export function createTerminalInput(
   input: typeof process.stdin = process.stdin,
@@ -84,13 +89,13 @@ export function confirmEdit(
 }
 
 export async function runRepl(
-  client: ChatClient,
-  model: string,
+  config: Pick<RunAgentOptions, "client" | "model" | "reasoningEffort">,
   cwd: string,
   input: typeof process.stdin = process.stdin,
   promptOutput: typeof process.stderr = process.stderr,
   answerOutput: typeof process.stdout = process.stdout,
 ): Promise<void> {
+  const { client, model, reasoningEffort } = config;
   const terminal = createTerminalInput(input, promptOutput);
   let history: ChatCompletionMessageParam[] | undefined;
   const meter = new TokenMeter();
@@ -112,18 +117,18 @@ export async function runRepl(
         continue;
       }
 
-      const result = await runAgent(
+      const result = await runAgent({
         client,
         model,
-        trimmed,
+        reasoningEffort,
+        request: trimmed,
         cwd,
-        25,
-        (command, workdir) => confirmBash(command, workdir, terminal.ask),
-        (target, oldStr, newStr) => confirmEdit(target, oldStr, newStr, terminal.ask),
+        confirmBash: (command, workdir) => confirmBash(command, workdir, terminal.ask),
+        confirmEdit: (target, oldStr, newStr) => confirmEdit(target, oldStr, newStr, terminal.ask),
         history,
         meter,
-        (line) => promptOutput.write(`${promptOutput.isTTY ? `\u001b[2m${line}\u001b[0m` : line}\n`),
-      );
+        reportTokens: (line) => promptOutput.write(`${promptOutput.isTTY ? `\u001b[2m${line}\u001b[0m` : line}\n`),
+      });
       history = result.messages;
       answerOutput.write(`Assistant: ${result.answer}\n`);
     }
@@ -136,31 +141,30 @@ async function main(): Promise<void> {
   const argument = process.argv.slice(2).join(" ").trim();
 
   if (!argument && process.stdin.isTTY) {
-    const { client, model } = createChatClient();
-    await runRepl(client, model, process.cwd());
+    const config = createChatClient();
+    process.stderr.write(formatProviderModel(config.provider, config.model));
+    await runRepl(config, process.cwd());
     return;
   }
 
   const request = argument || (await Bun.stdin.text()).trim();
   if (!request) throw new Error("Provide a request as an argument or on stdin");
-  const { client, model } = createChatClient();
+  const config = createChatClient();
+  process.stderr.write(formatProviderModel(config.provider, config.model));
   console.log(`You: ${request}`);
   const terminal = process.stdin.isTTY
     ? createTerminalInput(process.stdin, process.stderr)
     : undefined;
   try {
-    const { answer } = await runAgent(
-      client,
-      model,
+    const { answer } = await runAgent({
+      ...config,
       request,
-      process.cwd(),
-      25,
-      terminal ? (command, cwd) => confirmBash(command, cwd, terminal.ask) : undefined,
-      terminal ? (target, oldStr, newStr) => confirmEdit(target, oldStr, newStr, terminal.ask) : undefined,
-      undefined,
-      new TokenMeter(),
-      (line) => process.stderr.write(`${process.stderr.isTTY ? `\u001b[2m${line}\u001b[0m` : line}\n`),
-    );
+      cwd: process.cwd(),
+      confirmBash: terminal ? (command, cwd) => confirmBash(command, cwd, terminal.ask) : undefined,
+      confirmEdit: terminal ? (target, oldStr, newStr) => confirmEdit(target, oldStr, newStr, terminal.ask) : undefined,
+      meter: new TokenMeter(),
+      reportTokens: (line) => process.stderr.write(`${process.stderr.isTTY ? `\u001b[2m${line}\u001b[0m` : line}\n`),
+    });
     console.log(`Assistant: ${answer}`);
   } finally {
     terminal?.close();

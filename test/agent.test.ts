@@ -14,7 +14,7 @@ import { readFileTool } from "../src/tools/read";
 import { bashTool } from "../src/tools/bash";
 import { editFileTool } from "../src/tools/edit";
 import { codeSearchTool } from "../src/tools/search";
-import { confirmBash, confirmEdit, createTerminalInput, runRepl } from "../src/cli";
+import { confirmBash, confirmEdit, createTerminalInput, formatProviderModel, runRepl } from "../src/cli";
 import { TokenMeter, formatTokenReport } from "../src/tokens";
 
 const temporaryDirectories: string[] = [];
@@ -57,18 +57,18 @@ describe("token meter", () => {
   test("records each model call and propagates unknown usage without treating zero as missing", async () => {
     const meter = new TokenMeter();
     const lines: string[] = [];
-    await runAgent(mockClient([
+    await runAgent({ client: mockClient([
       mockCompletion({ role: "assistant", content: null, refusal: null, tool_calls: [{
         id: "read", type: "function", function: { name: "read_file", arguments: '{"path":"absent"}' },
       }] }, { prompt_tokens: 4210, completion_tokens: 0, total_tokens: 4210, prompt_tokens_details: { cached_tokens: 3900 } }),
       mockCompletion({ role: "assistant", content: "done", refusal: null }, { prompt_tokens: 0, completion_tokens: 182, total_tokens: 182, prompt_tokens_details: {} }),
-    ]), "test-model", "read absent", await tempDir(), 25, undefined, undefined, undefined, meter, (line) => lines.push(line));
+    ]), model: "test-model", request: "read absent", cwd: await tempDir(), meter, reportTokens: (line) => lines.push(line) });
     expect(meter.turns).toEqual([
       { turn: 1, prompt: 4210, cached: 3900, completion: 0 },
       { turn: 2, prompt: 0, cached: null, completion: 182 },
     ]);
     expect(meter.totals).toEqual({ prompt: 4210, cached: null, completion: 182, total: 4392 });
-    expect(lines[0]).toContain("[turn 1] in 4,210 (cached 3,900) · out 0");
+    expect(lines[0]).toContain("[turn 1] ctx 4,210 (cached 3,900) · out 0");
     expect(lines).toHaveLength(2);
     expect(lines.every((line) => line.startsWith("[turn "))).toBe(true);
     const report = formatTokenReport(meter);
@@ -85,7 +85,7 @@ describe("token meter", () => {
     const messages: string[] = [];
     const noMessage = mockCompletion({ role: "assistant", content: null, refusal: null });
     noMessage.choices = [];
-    await expect(runAgent(mockClient([noMessage]), "test-model", "request", await tempDir(), 1, undefined, undefined, undefined, meter, (line) => messages.push(line))).rejects.toThrow("no assistant message");
+    await expect(runAgent({ client: mockClient([noMessage]), model: "test-model", request: "request", cwd: await tempDir(), maxTurns: 1, meter, reportTokens: (line) => messages.push(line) })).rejects.toThrow("no assistant message");
     expect(meter.totals).toEqual({ prompt: null, cached: null, completion: null, total: null });
     expect(messages[0]).toContain("[turn 1]");
     meter.reset();
@@ -114,10 +114,27 @@ function mockClient(
 }
 
 describe("agent tool round-trip", () => {
+  test.each([
+    ["gpt-6-luna", "none"],
+    ["test-model", undefined],
+  ] as const)("forwards configured reasoning effort for %s", async (model, reasoningEffort) => {
+    const requests: ChatCompletionCreateParamsNonStreaming[] = [];
+    await runAgent({
+      client: mockClient([mockCompletion({ role: "assistant", content: "done", refusal: null })], (request) => requests.push(request)),
+      model,
+      reasoningEffort,
+      request: "hello",
+      cwd: await tempDir(),
+    });
+
+    if (reasoningEffort) expect(requests[0].reasoning_effort).toBe(reasoningEffort);
+    else expect("reasoning_effort" in requests[0]).toBe(false);
+  });
+
   test("reuses a copied history with one system message and complete tool turns", async () => {
     const cwd = await tempDir();
     await writeFile(path.join(cwd, "note.txt"), "remembered result");
-    const first = await runAgent(mockClient([
+    const first = await runAgent({ client: mockClient([
       mockCompletion({
         role: "assistant",
         content: null,
@@ -129,13 +146,13 @@ describe("agent tool round-trip", () => {
         }],
       }),
       mockCompletion({ role: "assistant", content: "First answer", refusal: null }),
-    ]), "test-model", "first request", cwd);
+    ]), model: "test-model", request: "first request", cwd });
     const history = first.messages;
     const originalHistory = structuredClone(history);
     let secondRequest: ChatCompletionCreateParamsNonStreaming | undefined;
-    await runAgent(mockClient([
+    await runAgent({ client: mockClient([
       mockCompletion({ role: "assistant", content: "Second answer", refusal: null }),
-    ], (request) => { secondRequest = structuredClone(request); }), "test-model", "second request", cwd, 25, undefined, undefined, history);
+    ], (request) => { secondRequest = structuredClone(request); }), model: "test-model", request: "second request", cwd, history });
 
     expect(history).toEqual(originalHistory);
     expect(secondRequest?.messages).toHaveLength(history.length + 1);
@@ -186,7 +203,7 @@ describe("agent tool round-trip", () => {
       (request) => calls.push(structuredClone(request)),
     );
 
-    const result = await runAgent(client, "test-model", "Read note.txt", cwd);
+    const result = await runAgent({ client, model: "test-model", request: "Read note.txt", cwd });
     expect(result.answer).toBe("It says hello and world.");
     expect(calls[0].messages[0]).toMatchObject({
       role: "system",
@@ -260,7 +277,7 @@ describe("agent tool round-trip", () => {
       }),
       mockCompletion({ role: "assistant", content: "Done", refusal: null }),
     ]);
-    const result = await runAgent(client, "test-model", "Read files", cwd);
+    const result = await runAgent({ client, model: "test-model", request: "Read files", cwd });
     expect(result.messages[3].content).toStartWith("Error:");
     expect(result.messages[4].content).toStartWith("Error:");
     expect(result.messages[5].content).toStartWith("Error:");
@@ -290,10 +307,10 @@ describe("agent tool round-trip", () => {
       mockCompletion({ role: "assistant", content: "done", refusal: null }),
     ], (request) => calls.push(structuredClone(request)));
     const confirmations: Array<[string, string]> = [];
-    const result = await runAgent(client, "test-model", "run commands", cwd, 25, async (command, dir) => {
+    const result = await runAgent({ client, model: "test-model", request: "run commands", cwd, confirmBash: async (command, dir) => {
       confirmations.push([command, dir]);
       return true;
-    });
+    } });
     expect(confirmations).toEqual([["printf 1", cwd], ["printf 2", cwd]]);
     expect(calls[1].messages.at(-2)).toMatchObject({ role: "tool", tool_call_id: "bash-one" });
     expect(calls[1].messages.at(-2)?.content).toContain("stdout:\n1");
@@ -324,10 +341,10 @@ describe("agent tool round-trip", () => {
       mockCompletion({ role: "assistant", content: "done", refusal: null }),
     ], (request) => calls.push(structuredClone(request)));
     const approvals: string[] = [];
-    await runAgent(client, "test-model", "edit both", cwd, 25, undefined, async (target) => {
+    await runAgent({ client, model: "test-model", request: "edit both", cwd, confirmEdit: async (target) => {
       approvals.push(target);
       return true;
-    });
+    } });
     const canonicalCwd = await realpath(cwd);
     expect(approvals).toEqual([path.join(canonicalCwd, "a.txt"), path.join(canonicalCwd, "b.txt")]);
     expect(calls[1].messages.at(-2)).toMatchObject({ role: "tool", tool_call_id: "edit-a" });
@@ -356,7 +373,7 @@ describe("agent tool round-trip", () => {
       mockCompletion({ role: "assistant", content: "Found it.", refusal: null }),
     ], (request) => calls.push(structuredClone(request)));
 
-    const result = await runAgent(client, "test-model", "Find needle", cwd);
+    const result = await runAgent({ client, model: "test-model", request: "Find needle", cwd });
     expect(result.answer).toBe("Found it.");
     expect(calls[0].tools?.map((tool) => tool.type === "function" ? tool.function.name : "")).toContain("code_search");
     expect(calls[1].messages.at(-1)).toMatchObject({ role: "tool", tool_call_id: "search-call" });
@@ -776,7 +793,7 @@ describe("interactive REPL", () => {
       }
     });
 
-    await runRepl(client, "test-model", cwd, input as unknown as typeof process.stdin, output as unknown as typeof process.stderr, output as unknown as typeof process.stdout);
+    await runRepl({ client, model: "test-model" }, cwd, input as unknown as typeof process.stdin, output as unknown as typeof process.stderr, output as unknown as typeof process.stdout);
 
     expect(prompts).toHaveLength(0);
     expect(requests[2].messages.at(-1)).toEqual({ role: "user", content: "second request" });
@@ -793,7 +810,7 @@ describe("interactive REPL", () => {
   test("exits cleanly when Ctrl-D closes input", async () => {
     const { input, output } = ttyPair();
     const client = mockClient([]);
-    const pending = runRepl(client, "test-model", "/unused", input as unknown as typeof process.stdin, output as unknown as typeof process.stderr, output as unknown as typeof process.stdout);
+    const pending = runRepl({ client, model: "test-model" }, "/unused", input as unknown as typeof process.stdin, output as unknown as typeof process.stderr, output as unknown as typeof process.stdout);
     input.emit("end");
     await pending;
     output.destroy();
@@ -806,11 +823,12 @@ describe("interactive REPL", () => {
     const stdout = new PassThrough();
     Object.defineProperty(input, "isTTY", { value: true });
     Object.defineProperty(stderr, "isTTY", { value: true });
+    const requests: ChatCompletionCreateParamsNonStreaming[] = [];
     const client = mockClient([
       mockCompletion({ role: "assistant", content: "one", refusal: null }, { prompt_tokens: 20, completion_tokens: 3, total_tokens: 23, prompt_tokens_details: { cached_tokens: 0 } }),
       mockCompletion({ role: "assistant", content: "two", refusal: null }, { prompt_tokens: 25, completion_tokens: 4, total_tokens: 29, prompt_tokens_details: { cached_tokens: 5 } }),
       mockCompletion({ role: "assistant", content: "fresh", refusal: null }, { prompt_tokens: 7, completion_tokens: 2, total_tokens: 9, prompt_tokens_details: { cached_tokens: 0 } }),
-    ]);
+    ], (request) => requests.push(request));
     let err = "";
     let out = "";
     stderr.on("data", (chunk) => { err += chunk.toString(); });
@@ -828,14 +846,15 @@ describe("interactive REPL", () => {
         queueMicrotask(() => input.write(reply));
       }
     });
-    await runRepl(client, "test-model", cwd, input as unknown as typeof process.stdin, stderr as unknown as typeof process.stderr, stdout as unknown as typeof process.stdout);
+    await runRepl({ client, model: "gpt-6-luna", reasoningEffort: "none" }, cwd, input as unknown as typeof process.stdin, stderr as unknown as typeof process.stderr, stdout as unknown as typeof process.stdout);
     expect(prompts).toHaveLength(0);
     expect(err).toContain("│ 1 │ 20");
-    expect(err).toContain("[turn 2] in 25 (cached 5) · out 4 · session 52");
-    expect(err).toContain("[turn 2] in 25 (cached 5) · out 4");
+    expect(err).toContain("[turn 2] ctx 25 (cached 5) · out 4 · total 52");
+    expect(err).toContain("[turn 2] ctx 25 (cached 5) · out 4");
     expect(err).toContain("Conversation reset.");
     expect(err).toContain("Session totals: in 7 (cached 0) · out 2 · total 9");
     expect((err.match(/\[turn 1\]/g) ?? [])).toHaveLength(2);
+    expect(requests[0].reasoning_effort).toBe("none");
     expect(err).not.toContain("initial prompt");
     expect(err).toContain("│ 1 │ 7");
     expect(out).toContain("Assistant: one");
@@ -848,18 +867,55 @@ describe("interactive REPL", () => {
   });
 });
 
-describe("OpenAI configuration", () => {
-  test("requires an API key and accepts an optional model override", () => {
-    expect(() => createChatClient({})).toThrow("OPENAI_API_KEY is required");
+describe("provider configuration", () => {
+  test("defaults to OpenAI and supports a model override", () => {
     const defaultConfig = createChatClient({ OPENAI_API_KEY: "test-key" });
     expect(defaultConfig.client.apiKey).toBe("test-key");
-    expect(defaultConfig.model).toBe("gpt-4o-mini");
-    expect(
-      createChatClient({
-        OPENAI_API_KEY: "test-key",
-        AGENT_MODEL: "test-model",
-      }).model,
-    ).toBe("test-model");
+    expect(defaultConfig.client.baseURL).toBe("https://api.openai.com/v1");
+    expect(defaultConfig.model).toBe("gpt-6-luna");
+    expect(defaultConfig.provider).toBe("openai");
+    expect(defaultConfig.reasoningEffort).toBe("none");
+    const lunaOverride = createChatClient({ OPENAI_API_KEY: "test-key", AGENT_MODEL: " gpt-6-luna " });
+    expect(lunaOverride.model).toBe("gpt-6-luna");
+    expect(lunaOverride.reasoningEffort).toBe("none");
+    expect(createChatClient({ OPENAI_API_KEY: "test-key", AGENT_MODEL: "test-model" }).reasoningEffort).toBeUndefined();
+  });
+
+  test.each([
+    ["xai", "XAI_API_KEY", "grok-4.7", "https://api.x.ai/v1"],
+  ] as const)("configures %s with its selected key, URL, and default model", (provider, keyName, model, baseURL) => {
+    const config = createChatClient({ AGENT_PROVIDER: provider, [keyName]: "selected-key" });
+    expect(config.provider).toBe(provider);
+    expect(config.client.apiKey).toBe("selected-key");
+    expect(config.client.baseURL).toBe(baseURL);
+    expect(config.model).toBe(model);
+    expect(config.reasoningEffort).toBeUndefined();
+  });
+
+  test("does not enable Luna reasoning for xAI with a Luna model override", () => {
+    const config = createChatClient({ AGENT_PROVIDER: "xai", XAI_API_KEY: "selected-key", AGENT_MODEL: "gpt-6-luna" });
+    expect(config.model).toBe("gpt-6-luna");
+    expect(config.reasoningEffort).toBeUndefined();
+  });
+
+  test.each([
+    ["openai", "OPENAI_API_KEY"],
+    ["xai", "XAI_API_KEY"],
+  ] as const)("requires the selected %s key without falling back", (provider, keyName) => {
+    const otherKeys: Record<string, string | undefined> = { OPENAI_API_KEY: "openai-secret", XAI_API_KEY: "xai-secret" };
+    delete otherKeys[keyName];
+    expect(() => createChatClient({ AGENT_PROVIDER: provider, ...otherKeys })).toThrow(`${keyName} is required`);
+    expect(() => createChatClient({ AGENT_PROVIDER: provider, [keyName]: "" })).toThrow(`${keyName} is required`);
+  });
+
+  test("rejects unsupported providers and an empty model override", () => {
+    expect(() => createChatClient({ AGENT_PROVIDER: "other", OPENAI_API_KEY: "secret" })).toThrow("Unknown AGENT_PROVIDER");
+    expect(() => createChatClient({ AGENT_PROVIDER: "groq", GROQ_API_KEY: "groq-secret" })).toThrow("Unknown AGENT_PROVIDER");
+    expect(() => createChatClient({ OPENAI_API_KEY: "secret", AGENT_MODEL: "   " })).toThrow("AGENT_MODEL must be a non-empty model name");
+  });
+
+  test("formats only the safe provider and model labels", () => {
+    expect(formatProviderModel("xai", "grok-4.7")).toBe("Provider: xai · Model: grok-4.7\n");
   });
 });
 

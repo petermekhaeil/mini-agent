@@ -55,7 +55,7 @@ export class TokenMeter {
 }
 
 export function formatTokenCall(entry: TokenEntry, sessionTotal: number | null = null): string {
-  return `[turn ${entry.turn}] in ${number(entry.prompt)} (cached ${number(entry.cached)}) · out ${number(entry.completion)} · session ${number(sessionTotal)}`;
+  return `[turn ${entry.turn}] ctx ${number(entry.prompt)} (cached ${number(entry.cached)}) · out ${number(entry.completion)} · total ${number(sessionTotal)}`;
 }
 
 export function formatTokenReport(meter: TokenMeter): string {
@@ -63,7 +63,7 @@ export function formatTokenReport(meter: TokenMeter): string {
     ? [
         "Tokens per model call (left column = turn):",
         Bun.inspect.table(Object.fromEntries(meter.turns.map((entry) => [entry.turn, {
-          in: number(entry.prompt),
+          ctx: number(entry.prompt),
           cached: number(entry.cached),
           out: number(entry.completion),
         }]))).trimEnd(),

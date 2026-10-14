@@ -1,5 +1,6 @@
 import type { ChatClient } from "./llm";
 import type {
+  ChatCompletionCreateParamsNonStreaming,
   ChatCompletionMessage,
   ChatCompletionMessageParam,
 } from "openai/resources/chat/completions";
@@ -102,6 +103,20 @@ export const EDIT_FILE_TOOL = {
 
 export type Message = ChatCompletionMessageParam | ChatCompletionMessage;
 
+export interface RunAgentOptions {
+  client: ChatClient;
+  model: string;
+  reasoningEffort?: ChatCompletionCreateParamsNonStreaming["reasoning_effort"];
+  request: string;
+  cwd?: string;
+  maxTurns?: number;
+  confirmBash?: ConfirmBash;
+  confirmEdit?: ConfirmEdit;
+  history?: ChatCompletionMessageParam[];
+  meter?: TokenMeter;
+  reportTokens?: (line: string) => void;
+}
+
 const SYSTEM_PROMPT = [
   "You are a coding assistant. Inspect the project, then answer the user's request.",
   "Use code_search, list_files, and read_file for read-only discovery.",
@@ -125,18 +140,19 @@ async function buildSystemPrompt(cwd: string): Promise<string> {
 }
 
 /** Run a bounded tool loop; the injected client keeps the API exchange testable. */
-export async function runAgent(
-  client: ChatClient,
-  model: string,
-  request: string,
+export async function runAgent({
+  client,
+  model,
+  reasoningEffort,
+  request,
   cwd = process.cwd(),
   maxTurns = 25,
-  confirmBash: ConfirmBash = async () => false,
-  confirmEdit: ConfirmEdit = async () => false,
-  history?: ChatCompletionMessageParam[],
-  meter: TokenMeter = new TokenMeter(),
-  reportTokens?: (line: string) => void,
-): Promise<{ answer: string; messages: ChatCompletionMessageParam[] }> {
+  confirmBash = async () => false,
+  confirmEdit = async () => false,
+  history,
+  meter = new TokenMeter(),
+  reportTokens,
+}: RunAgentOptions): Promise<{ answer: string; messages: ChatCompletionMessageParam[] }> {
   const messages: ChatCompletionMessageParam[] = history?.length
     ? [...history, { role: "user", content: request }]
     : [
@@ -150,6 +166,7 @@ export async function runAgent(
       messages,
       tools: [READ_FILE_TOOL, LIST_FILES_TOOL, CODE_SEARCH_TOOL, BASH_TOOL, EDIT_FILE_TOOL],
       tool_choice: "auto",
+      ...(reasoningEffort !== undefined ? { reasoning_effort: reasoningEffort } : {}),
     });
     const recorded = meter.record(response.usage);
     reportTokens?.(formatTokenCall(recorded, meter.totals.total));
