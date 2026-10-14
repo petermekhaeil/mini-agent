@@ -26,6 +26,12 @@ const providerConfig: Record<Provider, { apiKey: string; defaultModel: string; b
   xai: { apiKey: "XAI_API_KEY", defaultModel: "grok-4.7", baseURL: "https://api.x.ai/v1" },
 };
 
+const providerModelSettings: Partial<Record<Provider, Record<string, {
+  reasoningEffort: ChatCompletionCreateParamsNonStreaming["reasoning_effort"];
+}>>> = {
+  openai: { "gpt-6-luna": { reasoningEffort: "none" } },
+};
+
 export function createChatClient(
   env: Record<string, string | undefined> = process.env,
 ): ClientConfig {
@@ -39,11 +45,12 @@ export function createChatClient(
   if (!apiKey) throw new Error(`${config.apiKey} is required for provider ${provider}`);
   const model = env.AGENT_MODEL === undefined ? config.defaultModel : env.AGENT_MODEL.trim();
   if (!model) throw new Error("AGENT_MODEL must be a non-empty model name");
+  const modelSettings = providerModelSettings[provider]?.[model];
 
   return {
     client: new OpenAI({ apiKey, ...(config.baseURL ? { baseURL: config.baseURL } : {}) }),
     model,
     provider,
-    ...(provider === "openai" && model === "gpt-6-luna" ? { reasoningEffort: "none" as const } : {}),
+    ...modelSettings,
   };
 }

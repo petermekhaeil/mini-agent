@@ -70,6 +70,6 @@ export function formatTokenReport(meter: TokenMeter): string {
       ]
     : ["No model calls yet."];
   const totals = meter.totals;
-  rows.push(`Session totals: in ${number(totals.prompt)} (cached ${number(totals.cached)}) · out ${number(totals.completion)} · total ${number(totals.total)}`);
+  rows.push(`Session totals: input ${number(totals.prompt)} (cached ${number(totals.cached)}) · out ${number(totals.completion)} · total ${number(totals.total)}`);
   return `${rows.join("\n")}\n`;
 }

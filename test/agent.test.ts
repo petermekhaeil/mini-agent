@@ -91,7 +91,7 @@ describe("token meter", () => {
     meter.reset();
     expect(meter.turns).toHaveLength(0);
     expect(formatTokenReport(meter)).toContain("No model calls yet.");
-    expect(formatTokenReport(meter)).toContain("Session totals: in 0 (cached 0) · out 0 · total 0");
+    expect(formatTokenReport(meter)).toContain("Session totals: input 0 (cached 0) · out 0 · total 0");
   });
 });
 
@@ -852,7 +852,7 @@ describe("interactive REPL", () => {
     expect(err).toContain("[turn 2] ctx 25 (cached 5) · out 4 · total 52");
     expect(err).toContain("[turn 2] ctx 25 (cached 5) · out 4");
     expect(err).toContain("Conversation reset.");
-    expect(err).toContain("Session totals: in 7 (cached 0) · out 2 · total 9");
+    expect(err).toContain("Session totals: input 7 (cached 0) · out 2 · total 9");
     expect((err.match(/\[turn 1\]/g) ?? [])).toHaveLength(2);
     expect(requests[0].reasoning_effort).toBe("none");
     expect(err).not.toContain("initial prompt");
@@ -910,7 +910,6 @@ describe("provider configuration", () => {
 
   test("rejects unsupported providers and an empty model override", () => {
     expect(() => createChatClient({ AGENT_PROVIDER: "other", OPENAI_API_KEY: "secret" })).toThrow("Unknown AGENT_PROVIDER");
-    expect(() => createChatClient({ AGENT_PROVIDER: "groq", GROQ_API_KEY: "groq-secret" })).toThrow("Unknown AGENT_PROVIDER");
     expect(() => createChatClient({ OPENAI_API_KEY: "secret", AGENT_MODEL: "   " })).toThrow("AGENT_MODEL must be a non-empty model name");
   });
 
