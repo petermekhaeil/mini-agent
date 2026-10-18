@@ -16,7 +16,7 @@ export const READ_FILE_TOOL = {
   function: {
     name: "read_file",
     description:
-      "Read raw text from a file in the working directory.",
+      "Read raw text from a non-hidden file in the working directory.",
     parameters: {
       type: "object",
       properties: {

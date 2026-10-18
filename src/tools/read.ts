@@ -36,6 +36,18 @@ function limitOutput(text: string): string {
   return `${text.slice(0, keptChars)}\n[truncated ${omittedChars} chars]`;
 }
 
+function hasHiddenComponent(relativePath: string): boolean {
+  return relativePath.split(path.sep).some(
+    (component) => component.length > 1 && component.startsWith("."),
+  );
+}
+
+function hasUnsafeRawComponent(filePath: string): boolean {
+  return filePath.split(/[\\/]/).some(
+    (component) => component === ".." || (component.length > 1 && component.startsWith(".")),
+  );
+}
+
 export async function readFileTool(
   value: unknown,
   cwd = process.cwd(),
@@ -48,7 +60,20 @@ export async function readFileTool(
     if (typeof filePath !== "string" || filePath.length === 0) {
       throw new Error("path must be a non-empty string");
     }
-    return limitOutput(await readConfinedFile(filePath, cwd));
+    if (hasUnsafeRawComponent(filePath)) {
+      throw new Error("hidden files and directories cannot be read");
+    }
+    const { root, resolved } = await resolveConfinedPath(filePath, cwd);
+    const lexicalPath = path.resolve(cwd, filePath);
+    const lexicalRelative = path.relative(path.resolve(cwd), lexicalPath);
+    const canonicalRelative = path.relative(root, resolved);
+    if (
+      hasHiddenComponent(lexicalRelative) ||
+      hasHiddenComponent(canonicalRelative)
+    ) {
+      throw new Error("hidden files and directories cannot be read");
+    }
+    return limitOutput(await Bun.file(resolved).text());
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     return `Error: ${message}`;

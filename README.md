@@ -52,9 +52,13 @@ Each model call is recorded from the response's `prompt_tokens`, `completion_tok
 
 In the REPL, `/tokens` uses `Bun.inspect.table()` to print a per-call table and session totals without making a model call. `/new` clears both conversation history and token totals. Unknown or missing usage fields appear as `n/a` (and make their corresponding totals unknown), never as zero. Cached tokens, when reported, are part of input tokens, not an additional amount; `0` means the provider reported zero cached tokens. Providers may omit cached-token counts, in which case the cached session total stays `n/a`. One-shot and piped requests use a fresh meter and keep the conversation answer on stdout; meter lines go to stderr.
 
-Run it in a directory without secrets. `read_file` sends requested file contents and `code_search` sends matching lines to the selected provider. Conversation output stays on stdout; provider/model status, approvals, and token-meter lines/status stay on stderr. File paths are checked against the working directory, but approved shell commands can leave it and inherit environment variables, including provider API keys. Neither confirmation nor the working directory is a sandbox.
+## Permissions
 
-Before each `bash` command or `edit_file` change, the CLI shows what will run or change and asks for `y` or `Y`. Piped input cannot approve an action. `bash` uses blocking `Bun.spawnSync`, so it blocks the JavaScript event loop until the command exits or its 30-second timeout. The timeout sends `SIGKILL` to the shell process; child processes may survive. The tool truncates the returned text to 8,000 characters, but `spawnSync` captures full stdout and stderr first, so this is not a memory limit.
+Run it in a directory without secrets. `read_file` sends requested file contents and `code_search` sends matching lines to the selected provider. Conversation output stays on stdout; provider/model status, approvals, and token-meter lines/status stay on stderr. `read_file` refuses hidden paths such as `.env` and symlink aliases, but `code_search`, approved shell commands, and edits can still access secrets. This is not a sandbox or agent-wide secret protection.
+
+Every `bash` command and `edit_file` change requires a `y`/`Y` approval in the terminal. Piped input cannot approve an action. We considered auto-approving "safe" commands, but `cat` can expose credentials, while `rg --pre` and Git diff filters can run programs. Keeping a person in the loop is simpler to explain than a command allowlist, though approving a command is not a sandbox.
+
+`bash` uses blocking `Bun.spawnSync`, which captures full stdout and stderr before truncating the returned text to 8,000 characters. Its 30-second timeout kills the shell process; child processes may survive. The shell path is not a memory limit.
 
 ## How it works
 
@@ -63,14 +67,14 @@ sequenceDiagram
     participant User
     participant CLI as src/cli.ts
     participant Agent as src/loop.ts
-    participant OpenAI
+    participant Provider
     participant Tools as list_files / read_file / code_search / edit_file / bash
 
     User->>CLI: Request (interactive, argument, or piped input)
     CLI->>Agent: runAgent(options with request and optional history)
     loop Until final answer (max 25 model turns per request)
-        Agent->>OpenAI: Messages + tool descriptions
-        OpenAI-->>Agent: Assistant message
+        Agent->>Provider: Messages + tool descriptions
+        Provider-->>Agent: Assistant message
         Agent->>Agent: Keep full assistant message
         opt Assistant requests tools
             loop For each tool call

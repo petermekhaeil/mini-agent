@@ -958,6 +958,35 @@ describe("read_file", () => {
       "working directory",
     );
   });
+
+  test("refuses hidden paths, including aliases and hidden components before normalization", async () => {
+    const cwd = await tempDir();
+    const secret = "hidden secret content";
+    await writeFile(path.join(cwd, ".env"), secret);
+    await mkdir(path.join(cwd, ".hidden"));
+    await writeFile(path.join(cwd, ".hidden", "file"), secret);
+    await mkdir(path.join(cwd, "dir"));
+    await writeFile(path.join(cwd, "visible.txt"), "visible content");
+    await symlink(path.join(cwd, ".env"), path.join(cwd, "env-alias"));
+    await symlink(path.join(cwd, ".hidden"), path.join(cwd, "hidden-alias"));
+
+    for (const hiddenPath of [
+      ".env", ".hidden/file", "dir/.hidden/../visible.txt", "env-alias", "hidden-alias/file",
+    ]) {
+      const result = await readFileTool({ path: hiddenPath }, cwd);
+      expect(result).toStartWith("Error:");
+      expect(result).not.toContain(secret);
+    }
+    expect(await readFileTool({ path: "./visible.txt" }, cwd)).toBe("visible content");
+  });
+
+  test("allows visible files when the working directory itself is hidden", async () => {
+    const parent = await tempDir();
+    const cwd = path.join(parent, ".workspace");
+    await mkdir(cwd);
+    await writeFile(path.join(cwd, "visible.txt"), "visible content");
+    expect(await readFileTool({ path: "visible.txt" }, cwd)).toBe("visible content");
+  });
 });
 
 describe("list_files", () => {
