@@ -131,18 +131,25 @@ export async function runRepl(
         continue;
       }
 
-      const result = await runAgent({
-        client,
-        model,
-        reasoningEffort,
-        request: trimmed,
-        cwd,
-        confirmBash: (command, workdir) => confirmBash(command, workdir, terminal.ask),
-        confirmEdit: (target, oldStr, newStr) => confirmEdit(target, oldStr, newStr, terminal.ask, promptOutput.isTTY),
-        history,
-        meter,
-        reportTokens: (line) => promptOutput.write(`${promptOutput.isTTY ? `\u001b[2m${line}\u001b[0m` : line}\n`),
-      });
+      let result: Awaited<ReturnType<typeof runAgent>>;
+      try {
+        result = await runAgent({
+          client,
+          model,
+          reasoningEffort,
+          request: trimmed,
+          cwd,
+          confirmBash: (command, workdir) => confirmBash(command, workdir, terminal.ask),
+          confirmEdit: (target, oldStr, newStr) => confirmEdit(target, oldStr, newStr, terminal.ask, promptOutput.isTTY),
+          history,
+          meter,
+          reportTokens: (line) => promptOutput.write(`${promptOutput.isTTY ? `\u001b[2m${line}\u001b[0m` : line}\n`),
+        });
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        promptOutput.write(`Request failed: ${message}\n`);
+        continue;
+      }
       history = result.messages;
       answerOutput.write(`Assistant: ${result.answer}\n`);
       promptOutput.write(formatSessionTotals(meter));

@@ -778,6 +778,54 @@ describe("CLI bash confirmation", () => {
 });
 
 describe("interactive REPL", () => {
+  test("continues accepting requests after a model request fails without adding the failed turn to history", async () => {
+    const { input, output } = ttyPair();
+    let attempts = 0;
+    const requests: ChatCompletionCreateParamsNonStreaming[] = [];
+    const client: ChatClient = {
+      chat: { completions: { create: async (request) => {
+        requests.push(structuredClone(request));
+        if (attempts++ === 1) throw new Error("temporary API failure");
+        return mockCompletion({ role: "assistant", content: `Answer ${attempts}`, refusal: null });
+      } } },
+    };
+    const prompts: [string, string][] = [
+      ["You: ", "first request\n"],
+      ["You: ", "failed request\n"],
+      ["You: ", "second request\n"],
+      ["You: ", "/exit\n"],
+    ];
+    let transcript = "";
+    let pendingOutput = "";
+    output.on("data", (chunk) => {
+      const text = chunk.toString();
+      transcript += text;
+      pendingOutput += text;
+      while (prompts.length > 0) {
+        const [prompt, reply] = prompts[0];
+        const index = pendingOutput.indexOf(prompt);
+        if (index < 0) break;
+        pendingOutput = pendingOutput.slice(index + prompt.length);
+        prompts.shift();
+        queueMicrotask(() => input.write(reply));
+      }
+    });
+
+    await runRepl({ client, model: "test-model" }, "/unused", input as unknown as typeof process.stdin, output as unknown as typeof process.stderr, output as unknown as typeof process.stdout);
+
+    expect(attempts).toBe(3);
+    expect(prompts).toHaveLength(0);
+    expect(transcript).toContain("Request failed: temporary API failure");
+    expect(transcript).toContain("Assistant: Answer 1");
+    expect(transcript).toContain("Assistant: Answer 3");
+    expect(requests[1].messages.at(-1)).toEqual({ role: "user", content: "failed request" });
+    expect(requests[2].messages.at(-1)).toEqual({ role: "user", content: "second request" });
+    expect(requests[2].messages).toHaveLength(4);
+    expect(requests[2].messages[1]).toEqual({ role: "user", content: "first request" });
+    expect(requests[2].messages[2]).toEqual({ role: "assistant", content: "Answer 1", refusal: null });
+    input.destroy();
+    output.destroy();
+  });
   function ttyPair() {
     const input = new PassThrough() as PassThrough & { isTTY: boolean };
     const output = new PassThrough() as PassThrough & { isTTY: boolean };
@@ -785,6 +833,31 @@ describe("interactive REPL", () => {
     Object.defineProperty(output, "isTTY", { value: true });
     return { input, output };
   }
+
+  test("propagates answer-output failures", async () => {
+    const { input, output } = ttyPair();
+    const client = mockClient([mockCompletion({ role: "assistant", content: "answer", refusal: null })]);
+    const prompts: [string, string][] = [
+      ["You: ", "request\n"],
+      ["Request failed: answer output exploded", ""],
+    ];
+    output.on("data", (chunk) => {
+      const text = chunk.toString();
+      while (prompts.length > 0) {
+        const [prompt, reply] = prompts[0];
+        const index = text.indexOf(prompt);
+        if (index < 0) break;
+        prompts.shift();
+        if (reply) queueMicrotask(() => input.write(reply));
+      }
+    });
+    const answerOutput = { write: () => { throw new Error("answer output exploded"); } } as unknown as typeof process.stdout;
+
+    await expect(runRepl({ client, model: "test-model" }, "/unused", input as unknown as typeof process.stdin, output as unknown as typeof process.stderr, answerOutput)).rejects.toThrow("answer output exploded");
+    expect(prompts).toHaveLength(1);
+    input.destroy();
+    output.destroy();
+  });
 
   test("keeps one reader for user turns and approvals, and /new resets history", async () => {
     const cwd = await tempDir();
