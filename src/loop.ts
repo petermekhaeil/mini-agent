@@ -16,13 +16,23 @@ export const READ_FILE_TOOL = {
   function: {
     name: "read_file",
     description:
-      "Read raw text from a non-hidden file in the working directory.",
+      "Read raw text from a non-hidden file in the working directory. Optionally request a numbered line range with offset and limit.",
     parameters: {
       type: "object",
       properties: {
         path: {
           type: "string",
           description: "Path relative to the working directory",
+        },
+        offset: {
+          type: "integer",
+          minimum: 1,
+          description: "Optional 1-based starting line number; defaults to 1 when a range is requested.",
+        },
+        limit: {
+          type: "integer",
+          minimum: 1,
+          description: "Optional positive number of lines to return; defaults to all remaining lines.",
         },
       },
       required: ["path"],
@@ -119,7 +129,7 @@ export interface RunAgentOptions {
 
 const SYSTEM_PROMPT = [
   "You are a coding assistant. Inspect the project, then answer the user's request.",
-  "Use code_search, list_files, and read_file for read-only discovery.",
+  "Use code_search, list_files, and read_file for read-only discovery. Use read_file offset and limit to inspect numbered line ranges instead of using sed for line ranges.",
   "When a command or edit would help, call bash or edit_file directly instead of asking approval in chat.",
   "Change files only through approved bash or edit_file calls. Never retry a denied action.",
 ].join(" ");

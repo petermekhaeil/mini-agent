@@ -48,6 +48,37 @@ function hasUnsafeRawComponent(filePath: string): boolean {
   );
 }
 
+function validateRangeOption(value: unknown, name: string): number | undefined {
+  if (value === undefined) return undefined;
+  if (typeof value !== "number" || !Number.isSafeInteger(value) || value < 1) {
+    throw new Error(`${name} must be a positive integer`);
+  }
+  return value;
+}
+
+function splitLines(text: string): Array<{ text: string; ending: string }> {
+  const lines: Array<{ text: string; ending: string }> = [];
+  let start = 0;
+  for (let index = 0; index < text.length; index++) {
+    if (text[index] !== "\n" && text[index] !== "\r") continue;
+    const ending = text[index] === "\r" && text[index + 1] === "\n" ? "\r\n" : text[index];
+    lines.push({ text: text.slice(start, index), ending });
+    if (ending.length === 2) index++;
+    start = index + 1;
+  }
+  if (start < text.length) lines.push({ text: text.slice(start), ending: "" });
+  return lines;
+}
+
+function formatRange(text: string, offset: number, limit: number | undefined): string {
+  const lines = splitLines(text);
+  if (offset > lines.length) {
+    throw new Error(`offset ${offset} is beyond end of file (${lines.length} lines)`);
+  }
+  const selected = lines.slice(offset - 1, limit === undefined ? undefined : offset - 1 + limit);
+  return selected.map((line, index) => `${offset + index}: ${line.text}${line.ending}`).join("");
+}
+
 export async function readFileTool(
   value: unknown,
   cwd = process.cwd(),
@@ -57,6 +88,9 @@ export async function readFileTool(
       throw new Error("arguments must be an object");
     }
     const filePath = (value as Record<string, unknown>).path;
+    const options = value as Record<string, unknown>;
+    const offset = validateRangeOption(options.offset, "offset");
+    const limit = validateRangeOption(options.limit, "limit");
     if (typeof filePath !== "string" || filePath.length === 0) {
       throw new Error("path must be a non-empty string");
     }
@@ -73,7 +107,9 @@ export async function readFileTool(
     ) {
       throw new Error("hidden files and directories cannot be read");
     }
-    return limitOutput(await Bun.file(resolved).text());
+    const text = await Bun.file(resolved).text();
+    if (offset === undefined && limit === undefined) return limitOutput(text);
+    return limitOutput(formatRange(text, offset ?? 1, limit));
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     return `Error: ${message}`;
