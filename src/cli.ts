@@ -103,13 +103,13 @@ export function confirmEdit(
 }
 
 export async function runRepl(
-  config: Pick<RunAgentOptions, "client" | "model" | "reasoningEffort">,
+  config: Pick<RunAgentOptions, "client" | "model" | "reasoningEffort" | "maxTurns">,
   cwd: string,
   input: typeof process.stdin = process.stdin,
   promptOutput: typeof process.stderr = process.stderr,
   answerOutput: typeof process.stdout = process.stdout,
 ): Promise<void> {
-  const { client, model, reasoningEffort } = config;
+  const { client, model, reasoningEffort, maxTurns } = config;
   const terminal = createTerminalInput(input, promptOutput);
   let history: ChatCompletionMessageParam[] | undefined;
   const meter = new TokenMeter();
@@ -139,6 +139,11 @@ export async function runRepl(
           reasoningEffort,
           request: trimmed,
           cwd,
+          maxTurns,
+          onTurnLimit: async () => {
+            const answer = await terminal.ask("Keep going? [y/N] ");
+            return answer === "y" || answer === "Y";
+          },
           confirmBash: (command, workdir) => confirmBash(command, workdir, terminal.ask),
           confirmEdit: (target, oldStr, newStr) => confirmEdit(target, oldStr, newStr, terminal.ask, promptOutput.isTTY),
           history,
@@ -148,6 +153,10 @@ export async function runRepl(
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
         promptOutput.write(`Request failed: ${message}\n`);
+        continue;
+      }
+      if (result.stopped) {
+        promptOutput.write("Stopped; request not added to conversation history.\n");
         continue;
       }
       history = result.messages;

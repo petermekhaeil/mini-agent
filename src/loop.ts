@@ -120,6 +120,7 @@ export interface RunAgentOptions {
   request: string;
   cwd?: string;
   maxTurns?: number;
+  onTurnLimit?: () => Promise<boolean>;
   confirmBash?: ConfirmBash;
   confirmEdit?: ConfirmEdit;
   history?: ChatCompletionMessageParam[];
@@ -162,7 +163,7 @@ async function buildSystemPrompt(
   }
 }
 
-/** Run a bounded tool loop; the injected client keeps the API exchange testable. */
+/** Run a bounded tool loop; interactive callers can approve another batch of turns. */
 export async function runAgent({
   client,
   model,
@@ -170,13 +171,14 @@ export async function runAgent({
   request,
   cwd = process.cwd(),
   maxTurns = 25,
+  onTurnLimit,
   confirmBash = async () => false,
   confirmEdit = async () => false,
   history,
   meter = new TokenMeter(),
   reportTokens,
   reportWarning,
-}: RunAgentOptions): Promise<{ answer: string; messages: ChatCompletionMessageParam[] }> {
+}: RunAgentOptions): Promise<{ answer: string; messages: ChatCompletionMessageParam[]; stopped?: boolean }> {
   const messages: ChatCompletionMessageParam[] = history?.length
     ? [...history, { role: "user", content: request }]
     : [
@@ -184,7 +186,14 @@ export async function runAgent({
         { role: "user", content: request },
       ];
 
-  for (let turn = 0; turn < maxTurns; turn++) {
+  let turns = 0;
+  while (true) {
+    if (turns >= maxTurns) {
+      if (!onTurnLimit) throw new Error(`Agent stopped after ${maxTurns} turns without a final answer`);
+      if (!(await onTurnLimit())) return { answer: "", messages, stopped: true };
+      turns = 0;
+    }
+    turns++;
     const response = await client.chat.completions.create({
       model,
       messages,
@@ -248,8 +257,4 @@ export async function runAgent({
       });
     }
   }
-
-  throw new Error(
-    `Agent stopped after ${maxTurns} turns without a final answer`,
-  );
 }

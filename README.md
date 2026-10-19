@@ -37,7 +37,7 @@ Conversation reset.
 You: /exit
 ```
 
-`/new` starts a fresh conversation (and reloads `AGENT.md` on the next request); `/exit` or Ctrl-D exits. Conversation history is only kept in memory until the process exits. Passing a request argument or piping stdin still runs one request and exits.
+`/new` starts a fresh conversation (and reloads `AGENT.md` on the next request); `/exit` or Ctrl-D exits. If a request reaches 25 model calls without an answer, interactive mode asks `Keep going? [y/N]`; declining returns to the prompt without keeping that unfinished request in history. Conversation history is only kept in memory until the process exits. Passing a request argument or piping stdin still runs one request and exits at the turn limit.
 
 ## Token meter
 

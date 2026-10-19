@@ -115,6 +115,34 @@ function mockClient(
 }
 
 describe("agent tool round-trip", () => {
+  test("continues the same request after an approved turn limit", async () => {
+    const requests: ChatCompletionCreateParamsNonStreaming[] = [];
+    const client = mockClient([
+      mockCompletion({ role: "assistant", content: null, refusal: null, tool_calls: [{
+        id: "read", type: "function", function: { name: "read_file", arguments: '{"path":"missing.txt"}' },
+      }] }),
+      mockCompletion({ role: "assistant", content: "done", refusal: null }),
+    ], (request) => requests.push(structuredClone(request)));
+    let approvals = 0;
+    const result = await runAgent({ client, model: "test-model", request: "read it", cwd: await tempDir(), maxTurns: 1,
+      onTurnLimit: async () => { approvals++; return true; },
+    });
+    expect(approvals).toBe(1);
+    expect(result.answer).toBe("done");
+    expect(requests).toHaveLength(2);
+    expect(requests[1].messages).toHaveLength(4);
+    expect(requests[1].messages.filter((message) => message.role === "user")).toHaveLength(1);
+    expect(requests[1].messages.at(-1)).toMatchObject({ role: "tool", tool_call_id: "read" });
+  });
+
+  test("one-shot requests still stop at the turn limit", async () => {
+    const client = mockClient([mockCompletion({ role: "assistant", content: null, refusal: null, tool_calls: [{
+      id: "read", type: "function", function: { name: "read_file", arguments: '{"path":"missing.txt"}' },
+    }] })]);
+    await expect(runAgent({ client, model: "test-model", request: "read it", cwd: await tempDir(), maxTurns: 1 }))
+      .rejects.toThrow("Agent stopped after 1 turns without a final answer");
+  });
+
   test.each([
     ["gpt-6-luna", "none"],
     ["test-model", undefined],
@@ -844,6 +872,74 @@ describe("interactive REPL", () => {
     Object.defineProperty(output, "isTTY", { value: true });
     return { input, output };
   }
+
+  test("asks before continuing at the turn limit and keeps the same request", async () => {
+    const cwd = await tempDir();
+    const requests: ChatCompletionCreateParamsNonStreaming[] = [];
+    const client = mockClient([
+      mockCompletion({ role: "assistant", content: null, refusal: null, tool_calls: [{
+        id: "read", type: "function", function: { name: "read_file", arguments: '{"path":"missing.txt"}' },
+      }] }),
+      mockCompletion({ role: "assistant", content: "Finished", refusal: null }),
+    ], (request) => requests.push(structuredClone(request)));
+    const { input, output } = ttyPair();
+    const prompts: [string, string][] = [
+      ["You: ", "read it\n"], ["Keep going? [y/N] ", "y\n"], ["You: ", "/exit\n"],
+    ];
+    let transcript = "";
+    let pending = "";
+    output.on("data", (chunk) => {
+      transcript += chunk.toString();
+      pending += chunk.toString();
+      while (prompts.length && pending.includes(prompts[0][0])) {
+        pending = pending.slice(pending.indexOf(prompts[0][0]) + prompts[0][0].length);
+        const [, reply] = prompts.shift()!;
+        queueMicrotask(() => input.write(reply));
+      }
+    });
+    await runRepl({ client, model: "test-model", maxTurns: 1 }, cwd, input as unknown as typeof process.stdin, output as unknown as typeof process.stderr, output as unknown as typeof process.stdout);
+    expect(prompts).toHaveLength(0);
+    expect(requests).toHaveLength(2);
+    expect(requests[1].messages.filter((message) => message.role === "user")).toHaveLength(1);
+    expect(transcript).toContain("Assistant: Finished");
+    input.destroy(); output.destroy();
+  });
+
+  test("declining the turn limit returns to the prompt without keeping partial history", async () => {
+    const cwd = await tempDir();
+    const requests: ChatCompletionCreateParamsNonStreaming[] = [];
+    const client = mockClient([
+      mockCompletion({ role: "assistant", content: "First answer", refusal: null }),
+      mockCompletion({ role: "assistant", content: null, refusal: null, tool_calls: [{
+        id: "read", type: "function", function: { name: "read_file", arguments: '{"path":"missing.txt"}' },
+      }] }),
+      mockCompletion({ role: "assistant", content: "Third answer", refusal: null }),
+    ], (request) => requests.push(structuredClone(request)));
+    const { input, output } = ttyPair();
+    const prompts: [string, string][] = [
+      ["You: ", "first\n"], ["You: ", "stopped\n"],
+      ["Keep going? [y/N] ", "n\n"], ["You: ", "third\n"], ["You: ", "/exit\n"],
+    ];
+    let transcript = "";
+    let pending = "";
+    output.on("data", (chunk) => {
+      transcript += chunk.toString();
+      pending += chunk.toString();
+      while (prompts.length && pending.includes(prompts[0][0])) {
+        pending = pending.slice(pending.indexOf(prompts[0][0]) + prompts[0][0].length);
+        const [, reply] = prompts.shift()!;
+        queueMicrotask(() => input.write(reply));
+      }
+    });
+    await runRepl({ client, model: "test-model", maxTurns: 1 }, cwd, input as unknown as typeof process.stdin, output as unknown as typeof process.stderr, output as unknown as typeof process.stdout);
+    expect(prompts).toHaveLength(0);
+    expect(requests).toHaveLength(3);
+    expect(requests[2].messages).toHaveLength(4);
+    expect(requests[2].messages[1]).toEqual({ role: "user", content: "first" });
+    expect(requests[2].messages.at(-1)).toEqual({ role: "user", content: "third" });
+    expect(transcript).toContain("Stopped; request not added to conversation history.");
+    input.destroy(); output.destroy();
+  });
 
   test("propagates answer-output failures", async () => {
     const { input, output } = ttyPair();
