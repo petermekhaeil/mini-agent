@@ -15,6 +15,7 @@ import { bashTool } from "../src/tools/bash";
 import { editFileTool } from "../src/tools/edit";
 import { codeSearchTool } from "../src/tools/search";
 import { confirmBash, confirmEdit, createTerminalInput, formatProviderModel, runRepl } from "../src/cli";
+import type { Ask } from "../src/cli";
 import { TokenMeter, formatTokenReport } from "../src/tokens";
 
 const temporaryDirectories: string[] = [];
@@ -702,19 +703,18 @@ describe("CLI bash confirmation", () => {
     output.destroy();
   });
 
-  test("edit prompt shows escaped full replacement and requires y/Y", async () => {
+  test("edit prompt shows safe full replacement and requires y/Y", async () => {
     const { input, output } = ttyPair();
     let shown = "";
     output.on("data", (chunk) => { shown += chunk.toString(); });
     const oldStr = 'old\n"text"';
     const newStr = 'new $& and $$';
     const terminal = createTerminalInput(input as unknown as typeof process.stdin, output as unknown as typeof process.stderr);
-    const pending = confirmEdit("/work/a.txt", oldStr, newStr, terminal.ask);
+    const pending = confirmEdit("/work/a.txt", oldStr, newStr, terminal.ask, true);
     input.write("Y\n");
     expect(await pending).toBe(true);
-    expect(shown).toContain(JSON.stringify("/work/a.txt"));
-    expect(shown).toContain(JSON.stringify(oldStr));
-    expect(shown).toContain(JSON.stringify(newStr));
+    expect(shown).toContain("Edit /work/a.txt\nBefore:\n\u001b[31m- \u001b[0mold\n\u001b[31m- \u001b[0m\"text\"");
+    expect(shown).toContain("After:\n\u001b[32m+ \u001b[0mnew $& and $$\n[y/N]");
     terminal.close();
     input.destroy();
     output.destroy();
@@ -739,6 +739,41 @@ describe("CLI bash confirmation", () => {
     noInputTerminal.close();
     noInput.destroy();
     noOutput.destroy();
+  });
+
+  test("edit preview is plain, escapes controls, and does not truncate", async () => {
+    let prompt = "";
+    const ask: Ask = async (text) => { prompt = text; return "n"; };
+    const long = "x".repeat(10_000);
+    expect(await confirmEdit("bad\u001b[2J", "one\r\ntwo\n", `safe\u001b[31m\n${long}`, ask)).toBe(false);
+    expect(prompt).toContain("Edit bad\\u001b[2J");
+    expect(prompt).toContain("- one\\u000d\n- two");
+    expect(prompt).toContain("+ safe\\u001b[31m");
+    expect(prompt).toContain(long);
+    expect(prompt).not.toContain("\u001b[31m");
+    expect(prompt).toContain("[y/N]");
+  });
+
+  test("edit preview keeps filename newlines on one heading and marks empty replacement", async () => {
+    let prompt = "";
+    const ask: Ask = async (text) => { prompt = text; return "n"; };
+    expect(await confirmEdit("file\nAfter: spoof", "remove me", "", ask)).toBe(false);
+    expect(prompt).toContain("Edit file\\u000aAfter: spoof\nBefore:");
+    expect(prompt).toContain("After:\n(empty replacement)\n[y/N]");
+    const emptyReplacement = prompt;
+    await confirmEdit("file", "remove me", "(empty)", ask);
+    expect(prompt).toContain("After:\n+ (empty)\n[y/N]");
+    expect(prompt).not.toBe(emptyReplacement);
+    await confirmEdit("file", "", "literal \\\\u001b", ask);
+    expect(prompt).toContain("+ literal \\\\\\\\u001b");
+  });
+  test("marks final-newline changes even when replacement content also differs", async () => {
+    let prompt = "";
+    const ask: Ask = async (text) => { prompt = text; return "n"; };
+    await confirmEdit("file", "old\n", "new", ask);
+    expect(prompt).toContain("[final newline removed]");
+    await confirmEdit("file", "old", "new", ask);
+    expect(prompt).not.toContain("[final newline");
   });
 });
 

@@ -94,7 +94,7 @@ In the REPL, each request uses the conversation history, so later requests can r
 - `list_files` returns up to 200 paths. It skips `.git`, `node_modules`, and symlinks, and stops walking when it finds a 201st file.
 - `read_file` returns raw text and stays inside the working directory, limiting results to 8,000 characters. Optional `offset` (1-based line number) and `limit` (number of lines) select a numbered line range, so the agent can inspect part of a long file without an approved shell command.
 - `code_search` uses ripgrep regexes in a file or directory (the project root by default), with an optional glob. Paths resolve inside the working directory; results include file and line numbers, capped at 100 lines and 8,000 characters.
-- `edit_file` replaces one unique, exact text occurrence in an existing UTF-8 file after showing the target and full old/new strings for approval. The target must resolve inside the working directory and be a regular file. File creation is not supported.
+- `edit_file` replaces one unique, exact text occurrence in an existing UTF-8 file after showing the target and full old/new replacement preview for approval. The target must resolve inside the working directory and be a regular file. File creation is not supported.
 - `bash` runs `/bin/bash -c` after approval. It returns the exit code and separate stdout and stderr, or a denial, signal, or timeout message. Its returned text is capped at 8,000 characters after capture.
 
 For example, ask the agent: `Search src for TODO comments in TypeScript files` to have it call `code_search` with a pattern, path, and glob.

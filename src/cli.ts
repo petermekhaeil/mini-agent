@@ -83,8 +83,22 @@ export function confirmEdit(
   oldStr: string,
   newStr: string,
   ask: Ask,
+  color = false,
 ): ReturnType<ConfirmEdit> {
-  const message = `Replace in ${JSON.stringify(target)}: old_str=${JSON.stringify(oldStr)}, new_str=${JSON.stringify(newStr)}? [y/N] `;
+  const safe = (text: string) => text.replace(/[\\\u0000-\u0009\u000b-\u001f\u007f-\u009f\u001b\u202a-\u202e\u2066-\u2069]/g, (char) =>
+    char === "\\" ? "\\\\" : `\\u${char.charCodeAt(0).toString(16).padStart(4, "0")}`,
+  );
+  const lines = (text: string, prefix: string, ansi: string) => {
+    const safeText = safe(text);
+    const content = safeText.endsWith("\n") ? safeText.slice(0, -1) : safeText;
+    const rows = content ? content.split("\n") : ["(empty content)"];
+    return rows.map((line) => `${color ? ansi : ""}${prefix}${color ? "\u001b[0m" : ""}${line}`).join("\n");
+  };
+  const safeTarget = safe(target).replace(/\n/g, "\\u000a");
+  const after = newStr === "" ? "(empty replacement)" : lines(newStr, "+ ", "\u001b[32m");
+  const newlineChange = oldStr.endsWith("\n") !== newStr.endsWith("\n")
+    ? `\n[final newline ${newStr.endsWith("\n") ? "added" : "removed"}]` : "";
+  const message = `Edit ${safeTarget}\nBefore:\n${lines(oldStr, "- ", "\u001b[31m")}\nAfter:\n${after}${newlineChange}\n[y/N] `;
   return ask(message).then((answer) => answer === "y" || answer === "Y");
 }
 
@@ -124,7 +138,7 @@ export async function runRepl(
         request: trimmed,
         cwd,
         confirmBash: (command, workdir) => confirmBash(command, workdir, terminal.ask),
-        confirmEdit: (target, oldStr, newStr) => confirmEdit(target, oldStr, newStr, terminal.ask),
+        confirmEdit: (target, oldStr, newStr) => confirmEdit(target, oldStr, newStr, terminal.ask, promptOutput.isTTY),
         history,
         meter,
         reportTokens: (line) => promptOutput.write(`${promptOutput.isTTY ? `\u001b[2m${line}\u001b[0m` : line}\n`),
@@ -161,7 +175,7 @@ async function main(): Promise<void> {
       request,
       cwd: process.cwd(),
       confirmBash: terminal ? (command, cwd) => confirmBash(command, cwd, terminal.ask) : undefined,
-      confirmEdit: terminal ? (target, oldStr, newStr) => confirmEdit(target, oldStr, newStr, terminal.ask) : undefined,
+      confirmEdit: terminal ? (target, oldStr, newStr) => confirmEdit(target, oldStr, newStr, terminal.ask, process.stderr.isTTY) : undefined,
       meter: new TokenMeter(),
       reportTokens: (line) => process.stderr.write(`${process.stderr.isTTY ? `\u001b[2m${line}\u001b[0m` : line}\n`),
     });
