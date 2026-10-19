@@ -27,7 +27,7 @@ AGENT_PROVIDER=xai bun run start "Explain this project"
 
 The agent uses Chat Completions with tool calls; provider behavior and model capabilities can differ. OpenAI's `gpt-6-luna` needs `reasoning_effort: "none"` for tool calls on that API, so the agent sets it for that model. xAI marks Chat Completions as legacy. You can also pipe a request: `echo "Read README.md" | bun run start`.
 
-Run `bun run start` with no arguments in a terminal to start a conversational REPL:
+Run `bun run start` with no arguments in a terminal to enter interactive mode:
 
 ```text
 You: Find where directory listings are limited.
@@ -50,7 +50,7 @@ Each model call is recorded from the response's `prompt_tokens`, `completion_tok
 
 `ctx` is the current call's input tokens, including conversation history. On turn 1, that includes the system prompt, tool definitions, and first user message; the count arrives after the response. It is not the context-window maximum or remaining space. `total` sums input and output tokens across calls, including repeated history. It is not a dollar bill.
 
-The CLI prints session totals after each final answer. In the REPL, `/tokens` also uses `Bun.inspect.table()` to print a per-call table and session totals without making a model call. `/new` clears both conversation history and token totals. Unknown or missing usage fields appear as `n/a` (and make their corresponding totals unknown), never as zero. Cached tokens, when reported, are part of input tokens, not an additional amount; `0` means the provider reported zero cached tokens. Providers may omit cached-token counts, in which case the cached session total stays `n/a`. One-shot and piped requests use a fresh meter and keep the conversation answer on stdout; meter lines and session totals go to stderr. These totals count tokens, not currency cost.
+The CLI prints session totals after each final answer. In interactive mode, `/tokens` also uses `Bun.inspect.table()` to print a per-call table and session totals without making a model call. `/new` clears both conversation history and token totals. Unknown or missing usage fields appear as `n/a` (and make their corresponding totals unknown), never as zero. Cached tokens, when reported, are part of input tokens, not an additional amount; `0` means the provider reported zero cached tokens. Providers may omit cached-token counts, in which case the cached session total stays `n/a`. One-shot and piped requests use a fresh meter and keep the conversation answer on stdout; meter lines and session totals go to stderr. These totals count tokens, not currency cost.
 
 ## Permissions
 
@@ -86,10 +86,10 @@ sequenceDiagram
     end
     Agent-->>CLI: Answer + updated history
     CLI-->>User: Print final answer
-    Note over User,CLI: REPL repeats this cycle with history; /new clears it. One-shot runs once.
+    Note over User,CLI: Interactive mode repeats this cycle with history; /new clears it. One-shot runs once.
 ```
 
-In the REPL, each request uses the conversation history, so later requests can refer to earlier turns; `/new` clears that history. `src/loop.ts` keeps the full assistant tool call in the conversation. Each result goes back with the same `tool_call_id`, so OpenAI knows which call it answers.
+In interactive mode, each request uses the conversation history, so later requests can refer to earlier turns; `/new` clears that history. `src/loop.ts` keeps the full assistant tool call in the conversation. Each result goes back with the same `tool_call_id`, so OpenAI knows which call it answers.
 
 - `list_files` returns up to 200 paths. It skips `.git`, `node_modules`, and symlinks, and stops walking when it finds a 201st file.
 - `read_file` returns raw text and stays inside the working directory, limiting results to 8,000 characters. Optional `offset` (1-based line number) and `limit` (number of lines) select a numbered line range, so the agent can inspect part of a long file without an approved shell command.
