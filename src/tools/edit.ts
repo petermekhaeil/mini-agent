@@ -23,6 +23,7 @@ export async function editFileTool(
 ): Promise<string> {
   try {
     const { path: filePath, old_str: oldStr, new_str: newStr } = parseArgs(value);
+    if (oldStr === newStr) throw new Error("new_str must differ from old_str");
     for (const text of [oldStr, newStr]) {
       if (Buffer.from(text, "utf8").toString("utf8") !== text) {
         throw new Error("old_str and new_str must contain valid Unicode text");

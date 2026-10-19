@@ -536,6 +536,17 @@ describe("code_search", () => {
 });
 
 describe("edit_file", () => {
+  test("rejects an unchanged replacement without asking for approval", async () => {
+    const cwd = await tempDir();
+    const target = path.join(cwd, "note.txt");
+    await writeFile(target, "keep OLD here");
+    let prompts = 0;
+    const result = await editFileTool({ path: "note.txt", old_str: "OLD", new_str: "OLD" }, cwd, async () => { prompts++; return true; });
+    expect(result).toBe("Error: new_str must differ from old_str");
+    expect(prompts).toBe(0);
+    expect(await Bun.file(target).text()).toBe("keep OLD here");
+  });
+
   test("replaces one exact occurrence and keeps replacement tokens literal", async () => {
     const cwd = await tempDir();
     const target = path.join(await realpath(cwd), "note.txt");
