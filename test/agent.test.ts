@@ -888,6 +888,9 @@ describe("interactive REPL", () => {
     expect(err).toContain("[turn 2] ctx 25 (cached 5) · out 4");
     expect(err).toContain("Conversation reset.");
     expect(err).toContain("Session totals: input 7 (cached 0) · out 2 · total 9");
+    expect(err).toContain("Session totals: input 20 (cached 0) · out 3 · total 23");
+    expect(err).toContain("Session totals: input 45 (cached 5) · out 7 · total 52");
+    expect(err.indexOf("Conversation reset.")).toBeLessThan(err.indexOf("Session totals: input 7 (cached 0) · out 2 · total 9"));
     expect((err.match(/\[turn 1\]/g) ?? [])).toHaveLength(2);
     expect(requests[0].reasoning_effort).toBe("none");
     expect(err).not.toContain("initial prompt");
@@ -897,6 +900,7 @@ describe("interactive REPL", () => {
     expect(out).toContain("Assistant: fresh");
     expect(out).not.toContain("Conversation reset");
     expect(out).not.toContain("Tokens per model call");
+    expect(out).not.toContain("Session totals:");
     expect(err).toContain("\u001b[2m");
     input.destroy(); stderr.destroy(); stdout.destroy();
   });

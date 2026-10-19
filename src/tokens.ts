@@ -58,6 +58,11 @@ export function formatTokenCall(entry: TokenEntry, sessionTotal: number | null =
   return `[turn ${entry.turn}] ctx ${number(entry.prompt)} (cached ${number(entry.cached)}) · out ${number(entry.completion)} · total ${number(sessionTotal)}`;
 }
 
+export function formatSessionTotals(meter: TokenMeter): string {
+  const totals = meter.totals;
+  return `Session totals: input ${number(totals.prompt)} (cached ${number(totals.cached)}) · out ${number(totals.completion)} · total ${number(totals.total)}\n`;
+}
+
 export function formatTokenReport(meter: TokenMeter): string {
   const rows = meter.turns.length
     ? [
@@ -69,7 +74,6 @@ export function formatTokenReport(meter: TokenMeter): string {
         }]))).trimEnd(),
       ]
     : ["No model calls yet."];
-  const totals = meter.totals;
-  rows.push(`Session totals: input ${number(totals.prompt)} (cached ${number(totals.cached)}) · out ${number(totals.completion)} · total ${number(totals.total)}`);
+  rows.push(formatSessionTotals(meter).trimEnd());
   return `${rows.join("\n")}\n`;
 }

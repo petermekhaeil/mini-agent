@@ -6,7 +6,7 @@ import { runAgent } from "./loop";
 import type { RunAgentOptions } from "./loop";
 import type { ConfirmEdit } from "./tools/edit";
 import type { ChatCompletionMessageParam } from "openai/resources/chat/completions";
-import { TokenMeter, formatTokenReport } from "./tokens";
+import { TokenMeter, formatSessionTotals, formatTokenReport } from "./tokens";
 
 export type Ask = (prompt: string) => Promise<string | undefined>;
 
@@ -145,6 +145,7 @@ export async function runRepl(
       });
       history = result.messages;
       answerOutput.write(`Assistant: ${result.answer}\n`);
+      promptOutput.write(formatSessionTotals(meter));
     }
   } finally {
     terminal.close();
@@ -170,16 +171,18 @@ async function main(): Promise<void> {
     ? createTerminalInput(process.stdin, process.stderr)
     : undefined;
   try {
+    const meter = new TokenMeter();
     const { answer } = await runAgent({
       ...config,
       request,
       cwd: process.cwd(),
       confirmBash: terminal ? (command, cwd) => confirmBash(command, cwd, terminal.ask) : undefined,
       confirmEdit: terminal ? (target, oldStr, newStr) => confirmEdit(target, oldStr, newStr, terminal.ask, process.stderr.isTTY) : undefined,
-      meter: new TokenMeter(),
+      meter,
       reportTokens: (line) => process.stderr.write(`${process.stderr.isTTY ? `\u001b[2m${line}\u001b[0m` : line}\n`),
     });
     console.log(`Assistant: ${answer}`);
+    process.stderr.write(formatSessionTotals(meter));
   } finally {
     terminal?.close();
   }
