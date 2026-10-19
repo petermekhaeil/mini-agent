@@ -125,7 +125,10 @@ export interface RunAgentOptions {
   history?: ChatCompletionMessageParam[];
   meter?: TokenMeter;
   reportTokens?: (line: string) => void;
+  reportWarning?: (line: string) => void;
 }
+
+const MAX_PROJECT_INSTRUCTION_CHARS = 8_000;
 
 const SYSTEM_PROMPT = [
   "You are a coding assistant. Inspect the project, then answer the user's request.",
@@ -134,9 +137,19 @@ const SYSTEM_PROMPT = [
   "Change files only through approved bash or edit_file calls. Never retry a denied action.",
 ].join(" ");
 
-async function buildSystemPrompt(cwd: string): Promise<string> {
+async function buildSystemPrompt(
+  cwd: string,
+  reportWarning: (line: string) => void = console.error,
+): Promise<string> {
   try {
-    const projectInstructions = await readConfinedFile("AGENT.md", cwd);
+    const loadedInstructions = await readConfinedFile("AGENT.md", cwd);
+    const truncated = loadedInstructions.length > MAX_PROJECT_INSTRUCTION_CHARS;
+    const projectInstructions = truncated
+      ? loadedInstructions.slice(0, MAX_PROJECT_INSTRUCTION_CHARS)
+      : loadedInstructions;
+    if (truncated) {
+      reportWarning(`AGENT.md exceeds ${MAX_PROJECT_INSTRUCTION_CHARS} characters; using only the first ${MAX_PROJECT_INSTRUCTION_CHARS}.`);
+    }
     return [
       SYSTEM_PROMPT,
       "",
@@ -162,11 +175,12 @@ export async function runAgent({
   history,
   meter = new TokenMeter(),
   reportTokens,
+  reportWarning,
 }: RunAgentOptions): Promise<{ answer: string; messages: ChatCompletionMessageParam[] }> {
   const messages: ChatCompletionMessageParam[] = history?.length
     ? [...history, { role: "user", content: request }]
     : [
-        { role: "system", content: await buildSystemPrompt(cwd) },
+        { role: "system", content: await buildSystemPrompt(cwd, reportWarning) },
         { role: "user", content: request },
       ];
 

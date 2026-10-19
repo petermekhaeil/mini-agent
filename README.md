@@ -99,7 +99,7 @@ In interactive mode, each request uses the conversation history, so later reques
 
 For example, ask the agent: `Search src for TODO comments in TypeScript files` to have it call `code_search` with a pattern, path, and glob.
 
-If there is an `AGENT.md` in the working directory, the loop adds it to each new conversation's system prompt. The CLI handles one request at a time. Approved shell commands can still change files; see [BACKLOG.md](BACKLOG.md) for edit race and write-failure limitations.
+If there is an `AGENT.md` in the working directory, the loop adds up to 8,000 characters of it to each new conversation's system prompt and warns on stderr if it cuts the file. The CLI handles one request at a time. Approved shell commands can still change files; see [BACKLOG.md](BACKLOG.md) for edit race and write-failure limitations.
 
 ## Check it
 
