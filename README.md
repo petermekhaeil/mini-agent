@@ -2,6 +2,35 @@
 
 I built this to see the coding-agent loop for myself. It uses Bun, TypeScript, and provider-specific Chat Completions APIs. It can list files, search code, read files, make user-approved text edits, and run user-approved shell commands.
 
+## Credits
+
+Based on [Geoff Huntley's workshop](https://github.com/ghuntley/how-to-build-a-coding-agent) (the loop and five tools) and [Nader Dabit's article](https://x.com/dabit3/status/2009668398691582315).
+
+## What I added
+
+- The token meter shows how fast the input grows with each model call.
+- OpenAI and xAI use the same tool loop.
+- Every Bash command and edit needs approval. There is no allowlist. See [Permissions](#permissions).
+- `read_file` blocks hidden paths, so that tool won't send `.env` to the model.
+- `read_file` accepts line ranges. The agent had been asking to run `sed` through Bash.
+- `AGENT.md` goes into the system prompt when a conversation starts and stays in its history.
+- `edit_file` rejects unchanged text. The agent kept proposing no-op edits.
+- After 25 model calls without an answer, interactive mode asks whether to keep going.
+
+```text
+new conversation
+  AGENT.md → system prompt
+request
+  choose OpenAI or xAI
+  repeat until the model answers
+    model call → usage → token meter
+    tool call → list_files / code_search
+              → read_file → hidden-path check, optional line range
+              → edit_file → reject unchanged text, ask approval
+              → bash → ask approval
+    after 25 calls without an answer → Keep going? [y/N] (interactive mode)
+```
+
 ## Run
 
 Install ripgrep first (`brew install ripgrep` on macOS; `sudo apt install ripgrep` on Debian/Ubuntu). Then install dependencies, set a provider's API key, and ask a question:
@@ -37,7 +66,9 @@ Conversation reset.
 You: /exit
 ```
 
-`/new` starts a fresh conversation (and reloads `AGENT.md` on the next request); `/exit` or Ctrl-D exits. If a request reaches 25 model calls without an answer, interactive mode asks `Keep going? [y/N]`; declining returns to the prompt without keeping that unfinished request in history. Conversation history is only kept in memory until the process exits. Passing a request argument or piping stdin still runs one request and exits at the turn limit.
+`/new` starts a fresh conversation and reloads `AGENT.md` on the next request. `/exit` or Ctrl-D exits. History stays in memory until the process exits.
+
+If a request reaches 25 model calls without an answer, interactive mode asks `Keep going? [y/N]`. Declining returns to the prompt without keeping the unfinished request in history. A request passed as an argument or piped through stdin still stops at 25 calls.
 
 ## Token meter
 
@@ -48,13 +79,17 @@ Each model call is recorded from the response's `prompt_tokens`, `completion_tok
 [turn 2] ctx 4,380 (cached 4,100) · out 96 · total 8,868
 ```
 
-`ctx` is the current call's input tokens, including conversation history. On turn 1, that includes the system prompt, tool definitions, and first user message; the count arrives after the response. It is not the context-window maximum or remaining space. `total` sums input and output tokens across calls, including repeated history. It is not a dollar bill.
+`ctx` counts the current call's input tokens, including conversation history. On turn 1, that includes the system prompt, tool definitions, and first user message. The count arrives after the response. It is not the context-window maximum or remaining space. `total` adds input and output across calls, counting repeated history again. These are token counts, not a bill.
 
-The CLI prints session totals after each final answer. In interactive mode, `/tokens` also uses `Bun.inspect.table()` to print a per-call table and session totals without making a model call. `/new` clears both conversation history and token totals. Unknown or missing usage fields appear as `n/a` (and make their corresponding totals unknown), never as zero. Cached tokens, when reported, are part of input tokens, not an additional amount; `0` means the provider reported zero cached tokens. Providers may omit cached-token counts, in which case the cached session total stays `n/a`. One-shot and piped requests use a fresh meter and keep the conversation answer on stdout; meter lines and session totals go to stderr. These totals count tokens, not currency cost.
+The CLI prints session totals after each final answer. In interactive mode, `/tokens` prints a per-call table and session totals with `Bun.inspect.table()`, without making a model call. `/new` clears history and token totals.
+
+Missing usage fields show as `n/a`, not zero, and make the corresponding totals unknown. Cached tokens are part of input tokens, not an extra charge. A reported `0` means the provider counted zero cached tokens; if it omits the field, the cached total stays `n/a`. One-shot and piped requests use a fresh meter. Answers go to stdout; token counts go to stderr.
 
 ## Permissions
 
-Run it in a directory without secrets. `read_file` sends requested file contents and `code_search` sends matching lines to the selected provider. Conversation output stays on stdout; provider/model status, approvals, and token-meter lines/status stay on stderr. `read_file` refuses hidden paths such as `.env` and symlink aliases, but `code_search`, approved shell commands, and edits can still access secrets. This is not a sandbox or agent-wide secret protection.
+Run it in a directory without secrets. `read_file` sends requested file contents and `code_search` sends matching lines to the selected provider. `read_file` refuses hidden paths such as `.env` and symlink aliases, but `code_search`, approved shell commands, and edits can still reach secrets. This is not a sandbox.
+
+Answers go to stdout. Provider/model status, approvals, and token counts go to stderr.
 
 Every `bash` command and `edit_file` change requires a `y`/`Y` approval in the terminal. Piped input cannot approve an action. We considered auto-approving "safe" commands, but `cat` can expose credentials, while `rg --pre` and Git diff filters can run programs. Keeping a person in the loop is simpler to explain than a command allowlist, though approving a command is not a sandbox.
 
@@ -72,7 +107,7 @@ sequenceDiagram
 
     User->>CLI: Request (interactive, argument, or piped input)
     CLI->>Agent: runAgent(options with request and optional history)
-    loop Until final answer (max 25 model turns per request)
+    loop Until final answer
         Agent->>Provider: Messages + tool descriptions
         Provider-->>Agent: Assistant message
         Agent->>Agent: Keep full assistant message
@@ -86,10 +121,9 @@ sequenceDiagram
     end
     Agent-->>CLI: Answer + updated history
     CLI-->>User: Print final answer
-    Note over User,CLI: Interactive mode repeats this cycle with history; /new clears it. One-shot runs once.
 ```
 
-In interactive mode, each request uses the conversation history, so later requests can refer to earlier turns; `/new` clears that history. `src/loop.ts` keeps the full assistant tool call in the conversation. Each result goes back with the same `tool_call_id`, so OpenAI knows which call it answers.
+Interactive requests carry the conversation history, so later requests can refer to earlier turns. `/new` clears it. `src/loop.ts` keeps each full assistant tool call and sends the result back with the same `tool_call_id`.
 
 - `list_files` returns up to 200 paths. It skips `.git`, `node_modules`, and symlinks, and stops walking when it finds a 201st file.
 - `read_file` returns raw text and stays inside the working directory, limiting results to 8,000 characters. Optional `offset` (1-based line number) and `limit` (number of lines) select a numbered line range, so the agent can inspect part of a long file without an approved shell command.
@@ -99,7 +133,7 @@ In interactive mode, each request uses the conversation history, so later reques
 
 For example, ask the agent: `Search src for TODO comments in TypeScript files` to have it call `code_search` with a pattern, path, and glob.
 
-If there is an `AGENT.md` in the working directory, the loop adds up to 8,000 characters of it to each new conversation's system prompt and warns on stderr if it cuts the file. The CLI handles one request at a time. Approved shell commands can still change files; see [BACKLOG.md](BACKLOG.md) for edit race and write-failure limitations.
+If the working directory has an `AGENT.md`, the loop adds up to 8,000 characters to the new conversation's system prompt. It warns on stderr if it cuts the file. The CLI handles one request at a time. Approved shell commands can still change files; [BACKLOG.md](BACKLOG.md) lists the edit race and write-failure limitations.
 
 ## Check it
 
