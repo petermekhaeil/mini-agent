@@ -14,6 +14,11 @@ export function formatProviderModel(provider: Provider, model: string): string {
   return `Provider: ${provider} · Model: ${model}\n`;
 }
 
+function writeSessionTotals(output: typeof process.stderr, meter: TokenMeter): void {
+  const totals = formatSessionTotals(meter);
+  output.write(output.isTTY ? `\u001b[2m${totals.trimEnd()}\u001b[0m\n` : totals);
+}
+
 export function createTerminalInput(
   input: typeof process.stdin = process.stdin,
   output: typeof process.stderr = process.stderr,
@@ -165,7 +170,7 @@ export async function runRepl(
     }
     history = result.messages;
     answerOutput.write(`Assistant: ${result.answer}\n`);
-    promptOutput.write(formatSessionTotals(meter));
+    writeSessionTotals(promptOutput, meter);
   };
   try {
     while (true) {
@@ -209,7 +214,7 @@ async function main(): Promise<void> {
       reportTokens: (line) => process.stderr.write(`${process.stderr.isTTY ? `\u001b[2m${line}\u001b[0m` : line}\n`),
     });
     console.log(`Assistant: ${answer}`);
-    process.stderr.write(formatSessionTotals(meter));
+    writeSessionTotals(process.stderr, meter);
   } finally {
     terminal?.close();
   }

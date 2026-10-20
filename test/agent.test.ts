@@ -1070,6 +1070,7 @@ describe("interactive REPL", () => {
     expect(err).toContain("Session totals: input 7 (cached 0) · out 2 · total 9");
     expect(err).toContain("Session totals: input 20 (cached 0) · out 3 · total 23");
     expect(err).toContain("Session totals: input 45 (cached 5) · out 7 · total 52");
+    expect(err).toContain("\u001b[2mSession totals: input 45 (cached 5) · out 7 · total 52\u001b[0m\n");
     expect(err.indexOf("Conversation reset.")).toBeLessThan(err.indexOf("Session totals: input 7 (cached 0) · out 2 · total 9"));
     expect((err.match(/\[turn 1\]/g) ?? [])).toHaveLength(2);
     expect(requests[0].reasoning_effort).toBe("none");
