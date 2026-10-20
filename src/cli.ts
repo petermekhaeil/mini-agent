@@ -113,13 +113,13 @@ export async function runRepl(
   const terminal = createTerminalInput(input, promptOutput);
   let history: ChatCompletionMessageParam[] | undefined;
   const meter = new TokenMeter();
-  try {
+  const getInput = async (): Promise<string | undefined> => {
     while (true) {
       const request = await terminal.ask("You: ");
-      if (request === undefined) return;
+      if (request === undefined) return undefined;
       const trimmed = request.trim();
       if (!trimmed) continue;
-      if (trimmed === "/exit") return;
+      if (trimmed === "/exit") return undefined;
       if (trimmed === "/tokens") {
         promptOutput.write(formatTokenReport(meter));
         continue;
@@ -130,38 +130,49 @@ export async function runRepl(
         promptOutput.write("Conversation reset.\n");
         continue;
       }
-
-      let result: Awaited<ReturnType<typeof runAgent>>;
-      try {
-        result = await runAgent({
-          client,
-          model,
-          reasoningEffort,
-          request: trimmed,
-          cwd,
-          maxTurns,
-          onTurnLimit: async () => {
-            const answer = await terminal.ask("Keep going? [y/N] ");
-            return answer === "y" || answer === "Y";
-          },
-          confirmBash: (command, workdir) => confirmBash(command, workdir, terminal.ask),
-          confirmEdit: (target, oldStr, newStr) => confirmEdit(target, oldStr, newStr, terminal.ask, promptOutput.isTTY),
-          history,
-          meter,
-          reportTokens: (line) => promptOutput.write(`${promptOutput.isTTY ? `\u001b[2m${line}\u001b[0m` : line}\n`),
-        });
-      } catch (error) {
-        const message = error instanceof Error ? error.message : String(error);
-        promptOutput.write(`Request failed: ${message}\n`);
-        continue;
-      }
-      if (result.stopped) {
-        promptOutput.write("Stopped; request not added to conversation history.\n");
-        continue;
-      }
-      history = result.messages;
-      answerOutput.write(`Assistant: ${result.answer}\n`);
-      promptOutput.write(formatSessionTotals(meter));
+      return trimmed;
+    }
+  };
+  const runRequest = async (request: string): Promise<Awaited<ReturnType<typeof runAgent>> | undefined> => {
+    try {
+      return await runAgent({
+        client,
+        model,
+        reasoningEffort,
+        request,
+        cwd,
+        maxTurns,
+        onTurnLimit: async () => {
+          const answer = await terminal.ask("Keep going? [y/N] ");
+          return answer === "y" || answer === "Y";
+        },
+        confirmBash: (command, workdir) => confirmBash(command, workdir, terminal.ask),
+        confirmEdit: (target, oldStr, newStr) => confirmEdit(target, oldStr, newStr, terminal.ask, promptOutput.isTTY),
+        history,
+        meter,
+        reportTokens: (line) => promptOutput.write(`${promptOutput.isTTY ? `\u001b[2m${line}\u001b[0m` : line}\n`),
+      });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      promptOutput.write(`Request failed: ${message}\n`);
+      return undefined;
+    }
+  };
+  const print = (result: Awaited<ReturnType<typeof runAgent>>): void => {
+    if (result.stopped) {
+      promptOutput.write("Stopped; request not added to conversation history.\n");
+      return;
+    }
+    history = result.messages;
+    answerOutput.write(`Assistant: ${result.answer}\n`);
+    promptOutput.write(formatSessionTotals(meter));
+  };
+  try {
+    while (true) {
+      const request = await getInput();
+      if (request === undefined) return;
+      const result = await runRequest(request);
+      if (result) print(result);
     }
   } finally {
     terminal.close();

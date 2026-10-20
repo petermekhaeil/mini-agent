@@ -112,6 +112,7 @@ export const EDIT_FILE_TOOL = {
 };
 
 export type Message = ChatCompletionMessageParam | ChatCompletionMessage;
+type ToolCall = NonNullable<ChatCompletionMessage["tool_calls"]>[number];
 
 export interface RunAgentOptions {
   client: ChatClient;
@@ -187,16 +188,21 @@ export async function runAgent({
       ];
 
   let turns = 0;
-  while (true) {
+  const atTurnLimit = async (): Promise<boolean> => {
     if (turns >= maxTurns) {
       if (!onTurnLimit) throw new Error(`Agent stopped after ${maxTurns} turns without a final answer`);
-      if (!(await onTurnLimit())) return { answer: "", messages, stopped: true };
+      if (!(await onTurnLimit())) return true;
       turns = 0;
     }
-    turns++;
+    return false;
+  };
+
+  const callModel = async (
+    conversation: ChatCompletionMessageParam[],
+  ): Promise<ChatCompletionMessage> => {
     const response = await client.chat.completions.create({
       model,
-      messages,
+      messages: conversation,
       tools: [READ_FILE_TOOL, LIST_FILES_TOOL, CODE_SEARCH_TOOL, BASH_TOOL, EDIT_FILE_TOOL],
       tool_choice: "auto",
       ...(reasoningEffort !== undefined ? { reasoning_effort: reasoningEffort } : {}),
@@ -209,52 +215,52 @@ export async function runAgent({
     }
 
     // The API requires the full assistant turn before its tool results.
-    messages.push(assistant);
-    if (!assistant.tool_calls?.length) {
-      return {
-        answer: assistant.content ?? "",
-        messages,
-      };
+    conversation.push(assistant);
+    return assistant;
+  };
+
+  const toolFunctions: Record<string, (args: unknown) => Promise<string>> = {
+    read_file: (args) => readFileTool(args, cwd),
+    list_files: (args) => listFilesTool(args, cwd),
+    code_search: (args) => codeSearchTool(args, cwd),
+    bash: (args) => bashTool(args, cwd, confirmBash),
+    edit_file: (args) => editFileTool(args, cwd, confirmEdit),
+  };
+
+  const executeTool = async (call: ToolCall): Promise<ChatCompletionMessageParam> => {
+    let result: string;
+
+    if (call.type !== "function") {
+      result = "Error: unsupported custom tool call";
+    } else {
+      try {
+        const args: unknown = JSON.parse(call.function.arguments);
+        const tool = Object.hasOwn(toolFunctions, call.function.name)
+          ? toolFunctions[call.function.name]
+          : undefined;
+        result = tool
+          ? await tool(args)
+          : `Error: unknown tool ${call.function.name}`;
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        result = `Error: ${message}`;
+      }
     }
 
+    return {
+      role: "tool",
+      tool_call_id: call.id,
+      content: result,
+    };
+  };
+
+  while (true) {
+    if (await atTurnLimit()) return { answer: "", messages, stopped: true };
+    turns++;
+    const assistant = await callModel(messages);
+    if (!assistant.tool_calls?.length) return { answer: assistant.content ?? "", messages };
     for (const call of assistant.tool_calls) {
-      let result: string;
-
-      if (call.type !== "function") {
-        result = "Error: unsupported custom tool call";
-      } else {
-        try {
-          const args: unknown = JSON.parse(call.function.arguments);
-          switch (call.function.name) {
-            case "read_file":
-              result = await readFileTool(args, cwd);
-              break;
-            case "list_files":
-              result = await listFilesTool(args, cwd);
-              break;
-            case "code_search":
-              result = await codeSearchTool(args, cwd);
-              break;
-            case "bash":
-              result = await bashTool(args, cwd, confirmBash);
-              break;
-            case "edit_file":
-              result = await editFileTool(args, cwd, confirmEdit);
-              break;
-            default:
-              result = `Error: unknown tool ${call.function.name}`;
-          }
-        } catch (error) {
-          const message = error instanceof Error ? error.message : String(error);
-          result = `Error: ${message}`;
-        }
-      }
-
-      messages.push({
-        role: "tool",
-        tool_call_id: call.id,
-        content: result,
-      });
+      messages.push(await executeTool(call));
     }
   }
 }
